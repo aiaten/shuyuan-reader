@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: http:;" />
+  <title>书源阅读器</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <!-- 顶部标签 -->
+  <header class="topbar">
+    <div class="brand">书源阅读器</div>
+    <nav class="tabs" id="tabs">
+      <button class="tab active" data-view="shelf">书架</button>
+      <button class="tab" data-view="search">搜索</button>
+      <button class="tab" data-view="sources">书源</button>
+      <button class="tab" data-view="online">在线书源</button>
+    </nav>
+    <div class="topbar-right">
+      <span class="hint" id="dataDir"></span>
+      <button class="btn ghost" id="btnTheme" title="切换日间 / 夜间模式（Alt+T）">🌙 夜间</button>
+      <button class="btn ghost" id="btnInfo" title="数据目录与统计">统计</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- ============ 书架 ============ -->
+    <section class="view active" id="view-shelf">
+      <div class="pane-toolbar">
+        <button class="btn" id="btnRefreshShelf">刷新</button>
+        <button class="btn" id="btnExportShelf">导出全部为 TXT</button>
+        <span class="spacer"></span>
+        <input class="input" id="filterShelf" placeholder="过滤书名…" />
+      </div>
+      <div class="list" id="shelfList"></div>
+    </section>
+
+    <!-- ============ 搜索 ============ -->
+    <section class="view" id="view-search">
+      <div class="pane-toolbar">
+        <input class="input grow" id="searchInput" placeholder="输入书名或作者，回车搜索" />
+        <select class="input select" id="searchSource" title="选择书源"></select>
+        <select class="input select" id="searchMode" title="搜索模式">
+          <option value="all">全书源聚合</option>
+          <option value="one">仅选中书源</option>
+        </select>
+        <button class="btn primary" id="btnSearch">搜索</button>
+      </div>
+      <div id="searchProgress" class="sr-progress" hidden>
+        <div class="sr-bar"><div class="sr-bar-in" id="srBarIn"></div></div>
+        <span class="sr-text" id="srText">准备中…</span>
+        <button class="btn tiny" id="btnSrCancel" hidden>停止</button>
+      </div>
+      <div class="list" id="searchList"><p class="empty">输入关键词开始搜索</p></div>
+    </section>
+
+    <!-- ============ 书源 ============ -->
+    <section class="view" id="view-sources">
+      <div class="pane-toolbar">
+        <button class="btn" id="btnRefreshSources">刷新</button>
+        <button class="btn" id="btnImportSources">导入 JSON</button>
+        <button class="btn" id="btnExportSources">导出本地书源</button>
+        <button class="btn" id="btnAddSource">手动添加</button>
+        <span class="spacer"></span>
+        <span class="hint" id="sourceStats"></span>
+      </div>
+      <div class="list" id="sourceList"></div>
+    </section>
+
+    <!-- ============ 在线书源 ============ -->
+    <section class="view" id="view-online">
+      <div class="pane-toolbar">
+        <input class="input grow" id="onlineKeys" placeholder="筛选（如：番茄 / 起点），回车搜索" />
+        <select class="input select" id="onlineOrder">
+          <option value="time">按时间</option>
+          <option value="down">按下载量</option>
+        </select>
+        <button class="btn primary" id="btnOnlineSearch">搜索</button>
+        <span class="spacer"></span>
+        <button class="btn" id="btnOnlineUpdate" title="刷新 yckceo 最近更新的书源并同步安装">🔄 更新</button>
+        <button class="btn" id="btnOnlineCheck" title="对本地书源批量重跑可读性探测">🩺 校验书源</button>
+        <button class="btn" id="btnOnlineRss" title="浏览 yckceo 订阅源并导入">📥 订阅源</button>
+        <button class="btn" id="btnOnlineRoute" title="查看/切换在线站线路（主站被 ban 时用备用站）">🌐 线路</button>
+        <button class="btn" id="btnOnlinePrev">上一页</button>
+        <span class="hint" id="onlinePage">1 / 1</span>
+        <button class="btn" id="btnOnlineNext">下一页</button>
+      </div>
+      <div class="route-bar" id="onlineRouteBar" hidden></div>
+      <div class="list" id="onlineList"></div>
+    </section>
+
+    <!-- ============ 阅读器 ============ -->
+    <section class="view reader" id="view-reader">
+      <div class="reader-bar">
+        <button class="btn" id="btnReaderBack">← 返回</button>
+        <span class="reader-title" id="readerTitle"></span>
+        <span class="spacer"></span>
+        <select class="input select" id="readerChapter"></select>
+        <button class="btn" id="btnPrevChapter">上一章</button>
+        <button class="btn" id="btnNextChapter">下一章</button>
+        <button class="btn" id="btnExportBook">导出本书</button>
+      </div>
+      <div class="reader-body" id="readerBody"></div>
+    </section>
+  </main>
+
+  <!-- 通用对话框 -->
+  <div class="modal-mask" id="modalMask">
+    <div class="modal" id="modal">
+      <div class="modal-head">
+        <span id="modalTitle">标题</span>
+        <button class="btn ghost icon" id="modalClose">✕</button>
+      </div>
+      <div class="modal-body" id="modalBody"></div>
+      <div class="modal-foot" id="modalFoot"></div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toastWrap"></div>
+  <div class="busy" id="busy"><div class="spinner"></div><span id="busyText">处理中…</span></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
