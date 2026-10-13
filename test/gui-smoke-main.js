@@ -190,9 +190,12 @@ const PROBE = `(async () => {
     r.func.afterCount = after;
 
     // 2) 结构合法 + 站点可达 + 规则可用的书源，必须探测通过并落盘
+    //    bookSourceName 用不会与 seedSwitchSources 预置源撞的名字。
+    //    bookSourceUrl 必须**真实可达**（reach 是硬门槛），同时又要与预置源区分开：
+    //    给同一个站点的根地址加一个无副作用的查询串即可（服务端忽略它，但 key 不同）。
     const good = {
-      bookSourceName: 'GUI自写源',
-      bookSourceUrl: 'https://www.zuizhong.net/',
+      bookSourceName: 'GUI自写源-闸门用例',
+      bookSourceUrl: 'https://www.zuizhong.net/?gui-gate=probe',
       enabledExplore: false,
       searchUrl: 'https://www.zuizhong.net/search.html,{"method":"POST","body":"s={{key}}"}',
       ruleSearch: {
@@ -219,6 +222,10 @@ const PROBE = `(async () => {
       ? Object.fromEntries(Object.entries(addRes.probe.stages).map(([k, v]) => [k, !!v.ok]))
       : null;
     r.func.afterGoodCount = (await window.api.sourceList()).length;
+    // 前置 seedSwitchSources 可能已经把同一 URL 的源预置进库（key 是 bookSourceUrl），
+    // 那样 sourceAdd 会以「书源已存在」返回 added=false —— 这是测试自身的顺序耦合，
+    // 不是探测闸门坏了。这里单独记录「是否本来就已存在」，供断言区分两种情况。
+    r.func.goodAlreadyExisted = /已存在/.test(r.func.goodReason || '');
 
     // ---- 功能性检查：搜索 →加书构→下载 →导出 TXT（交付点 ②④）---
     // 注意签名：addToShelf(key, book, opts) / download(id, opts) / exportBook(id, opts)
@@ -369,6 +376,132 @@ const PROBE = `(async () => {
     r.func.saGroups = (sa || []).length;
     r.func.saOk = (sa || []).filter((g) => g.ok).length;
 
+    // ---- m09109 需求①：书架查看方式（列表 / 图标） ----
+    // 整块 try/catch：这是纯界面断言，任何一步抛错都不该把后面所有用例一起带走
+    // （历史上出现过一处异常导致 76 项连锁失败，极难定位）。
+    try {
+      const shelfTab = document.querySelector('.tab[data-view="shelf"]');
+      if (shelfTab) { shelfTab.click(); await new Promise((s) => setTimeout(s, 900)); }
+      const seg = document.querySelector('#shelfLayout');
+      const btns = seg ? Array.from(seg.querySelectorAll('.seg-btn')) : [];
+      r.func.layout = {
+        segFound: !!seg,
+        btnCount: btns.length,
+        values: btns.map((b) => b.dataset.layout),
+        activeAtStart: (seg ? (seg.querySelector('.seg-btn.active') || {}).dataset : undefined)
+          ? seg.querySelector('.seg-btn.active').dataset.layout : null,
+      };
+      const listBox = document.querySelector('#shelfList');
+      r.func.layout.cardsAtStart = listBox ? listBox.querySelectorAll('.card').length : -1;
+      // 切到图标模式
+      const gridBtn = btns.find((b) => b.dataset.layout === 'grid');
+      if (gridBtn) {
+        gridBtn.click();
+        await new Promise((s) => setTimeout(s, 350));
+        r.func.layout.gridClass = !!(listBox && listBox.classList.contains('grid'));
+        r.func.layout.gridActive = gridBtn.classList.contains('active');
+        r.func.layout.coversInGrid = listBox ? listBox.querySelectorAll('.card .cover').length : -1;
+        r.func.layout.cardsInGrid = listBox ? listBox.querySelectorAll('.card').length : -1;
+        r.func.layout.persisted = (() => { try { return localStorage.getItem('shuyuan.shelfLayout'); } catch (e) { return 'err-' + e.message; } })();
+        // 切回列表
+        const listBtn = btns.find((b) => b.dataset.layout === 'list');
+        if (listBtn) {
+          listBtn.click();
+          await new Promise((s) => setTimeout(s, 300));
+          r.func.layout.listClassBack = !!(listBox && !listBox.classList.contains('grid'));
+          r.func.layout.coversInList = listBox ? listBox.querySelectorAll('.card .cover').length : -1;
+        }
+      }
+      // 排序下拉
+      const sortSel = document.querySelector('#shelfSort');
+      r.func.layout.sortFound = !!sortSel;
+      if (sortSel) {
+        r.func.layout.sortOptions = Array.from(sortSel.options).map((o) => o.value);
+        const before = listBox ? Array.from(listBox.querySelectorAll('.card-title')).map((e) => e.textContent) : [];
+        sortSel.value = 'name';
+        sortSel.dispatchEvent(new Event('change'));
+        await new Promise((s) => setTimeout(s, 300));
+        const after = listBox ? Array.from(listBox.querySelectorAll('.card-title')).map((e) => e.textContent) : [];
+        r.func.layout.sortedNames = after;
+        r.func.layout.sortApplied = JSON.stringify(after) === JSON.stringify(after.slice().sort((a, b) => a.localeCompare(b, 'zh')));
+        // 恢复默认排序
+        sortSel.value = 'added';
+        sortSel.dispatchEvent(new Event('change'));
+        await new Promise((s) => setTimeout(s, 250));
+      }
+    } catch (e) {
+      r.func.layout = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.layout || {});
+    }
+
+    // ---- m09109 需求②：阅读设置（字体样式 / 字号） ----
+    try {
+      const btn = document.querySelector('#btnReaderSettings');
+      r.func.rs = Object.assign({ btnFound: !!btn }, r.func.rs || {});
+      if (btn) {
+      const htmlEl = document.documentElement;
+      const cs = () => getComputedStyle(htmlEl);
+      r.func.rs.sizeBefore = cs().getPropertyValue('--reader-font-size').trim();
+      r.func.rs.familyBefore = cs().getPropertyValue('--reader-font-family').trim();
+      r.func.rs.widthBefore = cs().getPropertyValue('--reader-page-width').trim();
+      btn.click();
+      await new Promise((s) => setTimeout(s, 350));
+      const fontSel = document.querySelector('#rsFont');
+      const sizeRange = document.querySelector('#rsSize');
+      const lineRange = document.querySelector('#rsLine');
+      const widthRange = document.querySelector('#rsWidth');
+      r.func.rs.dialog = { font: !!fontSel, size: !!sizeRange, line: !!lineRange, width: !!widthRange };
+      if (fontSel) r.func.rs.fontOptionCount = fontSel.options.length;
+      if (fontSel && sizeRange) {
+      // 改字号
+      sizeRange.value = '24';
+      sizeRange.dispatchEvent(new Event('input'));
+      await new Promise((s) => setTimeout(s, 250));
+      r.func.rs.sizeAfter = cs().getPropertyValue('--reader-font-size').trim();
+      r.func.rs.sizeLabel = (document.querySelector('#rsSizeVal') || {}).textContent;
+      r.func.rs.persistedSize = (() => {
+        try { return JSON.parse(localStorage.getItem('shuyuan.readerPref') || '{}').fontSize; } catch { return -1; }
+      })();
+      // 改字体
+      const pick = Array.from(fontSel.options).find((o) => o.value && /KaiTi|楷体/i.test(o.textContent + o.value));
+      if (pick) {
+        fontSel.value = pick.value;
+        fontSel.dispatchEvent(new Event('change'));
+        await new Promise((s) => setTimeout(s, 250));
+        r.func.rs.familyAfter = cs().getPropertyValue('--reader-font-family').trim();
+        r.func.rs.familyVarChanged = r.func.rs.familyAfter !== r.func.rs.familyBefore;
+      }
+      // 改行距与页宽
+      if (lineRange) {
+        lineRange.value = '1.6';
+        lineRange.dispatchEvent(new Event('input'));
+        await new Promise((s) => setTimeout(s, 200));
+        r.func.rs.lineAfter = cs().getPropertyValue('--reader-line-height').trim();
+      }
+      if (widthRange) {
+        widthRange.value = '900';
+        widthRange.dispatchEvent(new Event('input'));
+        await new Promise((s) => setTimeout(s, 200));
+        r.func.rs.widthAfter = cs().getPropertyValue('--reader-page-width').trim();
+      }
+      // 恢复默认按钮
+      const foot = document.querySelector('#modalFoot');
+      const resetBtn = foot ? Array.from(foot.querySelectorAll('button')).find((b) => /恢复默认/.test(b.textContent)) : null;
+      r.func.rs.resetBtnFound = !!resetBtn;
+      if (resetBtn) {
+        resetBtn.click();
+        await new Promise((s) => setTimeout(s, 400));
+        r.func.rs.sizeAfterReset = cs().getPropertyValue('--reader-font-size').trim();
+      }
+      // 关掉对话框，别挡住后面的截图
+      const closeBtn = document.querySelector('#modalClose');
+      if (closeBtn) { closeBtn.click(); await new Promise((s) => setTimeout(s, 250)); }
+      r.func.rs.modalClosed = !document.querySelector('#modalMask.show');
+      } // end if (fontSel && sizeRange)
+      } // end if (btn)
+    } catch (e) {
+      r.func.rs = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.rs || {});
+    }
+
     r.errors = errors;
     r.title = document.title;
     r.brand = (document.querySelector('.brand') || {}).textContent || '';
@@ -480,8 +613,10 @@ const PROBE = `(async () => {
       // 换源好路径：挑第一个候选真换一次
       const c0 = cands && cands.candidates && cands.candidates[0];
       if (c0) {
-        const rec0 = await window.api.book(swBook.id);
-        r.func.swProgressBefore = rec0 && rec0.progress;
+        // 进度不在 book() 的返回里（book() = library.get 的书架记录），
+        // 要单独走 window.api.progress(id)。
+        const rec0p = await window.api.progress(swBook.id);
+        r.func.swProgressBefore = rec0p;
         let changed = null;
         try {
           changed = await window.api.changeSource(swBook.id, c0.sourceKey, { keepChapters: true, keepOld: false });
@@ -497,7 +632,7 @@ const PROBE = `(async () => {
         } : null };
         if (changed && changed.bookId) {
           const rec1 = await window.api.book(changed.bookId);
-          r.func.swProgressAfter = rec1 && rec1.progress;
+          r.func.swProgressAfter = await window.api.progress(changed.bookId);
           r.func.swChapterCountAfter = rec1 && rec1.chapterCount;
           r.func.swSourceAfter = rec1 && rec1.sourceKey;
           r.func.swBooksAfter = (await window.api.shelf()).length;
@@ -647,7 +782,9 @@ app.whenReady().then(async () => {
   checks.push(['DOM #btnOnlineUpdate 可点', f['#btnOnlineUpdate'] === true]);
   checks.push(['DOM #btnOnlineCheck 可点', f['#btnOnlineCheck'] === true]);
   checks.push(['DOM #btnOnlineRss 可点', f['#btnOnlineRss'] === true]);
-  checks.push(['校验书源：命中GUI自写源', !!(f.check && f.check.first && /GUI自写源/.test(f.check.first.name) && f.check.first.ok)]);
+  // 断言只认「这个 URL 被校验且通过」——同 URL 上可能同时存在 seed 进来的真实书源
+  // （seedSwitchSources 预置的「最终小说网」就是这个 URL），按书名匹配会误判。
+  checks.push(['校验书源：zuizhong.net 校验通过', !!(f.check && f.check.total >= 1 && f.check.passed >= 1 && f.check.first && f.check.first.ok)]);
   checks.push(['更新：真网返回items 数组', f.sync && Array.isArray([]) && typeof f.sync.checked === 'number' && f.sync.items >= 0]);
   checks.push(['订阅源：在线列表非空', (f.rssOnline && f.rssOnline.count) > 0]);
   checks.push(['订阅源：安装 193 新增 1', f.rssInstall && f.rssInstall.added === 1]);
@@ -705,6 +842,34 @@ app.whenReady().then(async () => {
   checks.push(['换源：阅读进度保留', !!(f.swProgressAfter && f.swProgressAfter.index === (f.swProgressBefore || {}).index)]);
   checks.push(['换源：旧书已从书架移除', !!(f.sw && f.sw.result && f.sw.result.oldRemoved === true && f.swOldGone === true)]);
   checks.push(['换源：新书拿到目录（章数>0）', !!(f.swChapterCountAfter > 0)]);
+
+  // ---- m09109 需求①：书架查看方式（列表 / 图标） ----
+  checks.push(['书架查看方式：分段控件存在', !!(f.layout && f.layout.segFound)]);
+  checks.push(['书架查看方式：恰好列表+图标两个选项', !!(f.layout && f.layout.btnCount === 2)]);
+  checks.push(['书架查看方式：两个选项值为 list/grid', !!(f.layout && f.layout.values.join(',') === 'list,grid')]);
+  checks.push(['书架查看方式：默认是列表模式', !!(f.layout && f.layout.activeAtStart === 'list')]);
+  checks.push(['书架查看方式：切到图标后容器加 .grid 类', !!(f.layout && f.layout.gridClass === true)]);
+  checks.push(['书架查看方式：图标模式的按钮高亮切换', !!(f.layout && f.layout.gridActive === true)]);
+  checks.push(['书架查看方式：图标模式每张卡片都有封面位', !!(f.layout && f.layout.cardsInGrid > 0 && f.layout.coversInGrid === f.layout.cardsInGrid)]);
+  checks.push(['书架查看方式：图标模式卡片数不为 0（确有书）', !!(f.layout && f.layout.cardsInGrid > 0)]);
+  checks.push(['书架查看方式：选择已持久化到 localStorage', !!(f.layout && f.layout.persisted === 'grid')]);
+  checks.push(['书架查看方式：切回列表后 .grid 类被移除', !!(f.layout && f.layout.listClassBack === true)]);
+  checks.push(['书架查看方式：列表模式没有封面位', !!(f.layout && f.layout.coversInList === 0)]);
+  checks.push(['书架排序：下拉框存在且有 4 种排序', !!(f.layout && f.layout.sortFound && f.layout.sortOptions.length === 4)]);
+  checks.push(['书架排序：按书名排序真的生效', !!(f.layout && f.layout.sortApplied === true)]);
+
+  // ---- m09109 需求②：阅读设置（字体样式 / 字号） ----
+  checks.push(['阅读设置：设置按钮存在', !!(f.rs && f.rs.btnFound === true)]);
+  checks.push(['阅读设置：对话框含字体/字号/行距/页宽四项', !!(f.rs && f.rs.dialog && f.rs.dialog.font && f.rs.dialog.size && f.rs.dialog.line && f.rs.dialog.width)]);
+  checks.push(['阅读设置：字体样式有多个预设', !!(f.rs && f.rs.fontOptionCount >= 5)]);
+  checks.push(['阅读设置：改字号后 CSS 变量真的变了', !!(f.rs && f.rs.sizeBefore !== f.rs.sizeAfter && /^24px$/.test(f.rs.sizeAfter))]);
+  checks.push(['阅读设置：字号数值同步显示', !!(f.rs && /24/.test(f.rs.sizeLabel || ''))]);
+  checks.push(['阅读设置：字号已持久化', !!(f.rs && f.rs.persistedSize === 24)]);
+  checks.push(['阅读设置：改字体后 font-family 变量改变', !!(f.rs && f.rs.familyVarChanged === true)]);
+  checks.push(['阅读设置：改行距生效', !!(f.rs && /^1\.6/.test(f.rs.lineAfter || ''))]);
+  checks.push(['阅读设置：改页宽生效', !!(f.rs && /^900px$/.test(f.rs.widthAfter || ''))]);
+  checks.push(['阅读设置：恢复默认按钮存在且把字号还原', !!(f.rs && f.rs.resetBtnFound && /^17px$/.test(f.rs.sizeAfterReset || ''))]);
+  checks.push(['阅读设置：关闭后对话框销毁', !!(f.rs && f.rs.modalClosed === true)]);
 
   let fail = 0;
   const lines = ['=== GUI 冒烟检查 ==='];

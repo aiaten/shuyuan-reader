@@ -93,4 +93,58 @@ contextBridge.exposeInMainWorld('api', {
   pickDir: () => call('dialog:pickDir'),
   showInFolder: (p) => call('shell:showItem', p),
   openExternal: (url) => call('shell:openExternal', url),
+
+  /* ==================== 内置浏览器 ====================
+   * 只做「把用户送到站点官方页面 + 书签/历史」，不抓正文、不绕付费墙。 */
+  browser: {
+    /** 预置站点表 + 合规文案 */
+    listSites: () => call('browser:listSites'),
+    /** 地址归一化（`qidian.com` → `https://qidian.com`） */
+    normalize: (input) => call('browser:normalize', input),
+
+    /* 标签 ↔ webview guest 绑定 */
+    bind: (tabId, guestId) => call('browser:bind', tabId, guestId),
+    unbind: (tabId) => call('browser:unbind', tabId),
+
+    /* 导航 */
+    navigate: (tabId, url) => call('browser:navigate', tabId, url),
+    back: (tabId) => call('browser:back', tabId),
+    forward: (tabId) => call('browser:forward', tabId),
+    reload: (tabId, ignoreCache) => call('browser:reload', tabId, ignoreCache),
+    stop: (tabId) => call('browser:stop', tabId),
+    state: (tabId) => call('browser:state', tabId),
+
+    /* 书签 */
+    bookmarks: () => call('browser:bookmarks'),
+    addBookmark: (bm) => call('browser:addBookmark', bm),
+    removeBookmark: (url) => call('browser:removeBookmark', url),
+    renameBookmark: (url, title) => call('browser:renameBookmark', url, title),
+    clearBookmarks: () => call('browser:clearBookmarks'),
+
+    /* 历史 */
+    history: (limit) => call('browser:history', limit),
+    pushHistory: (h) => call('browser:pushHistory', h),
+    clearHistory: () => call('browser:clearHistory'),
+
+    /* 会话（上次开的标签，下次进浏览器页签接上） */
+    session: () => call('browser:session'),
+    saveSession: (tabs) => call('browser:saveSession', tabs),
+    stats: () => call('browser:stats'),
+
+    /** 用系统浏览器打开（内置视图打不开时的退路） */
+    openInSystem: (url) => call('browser:openExternal', url),
+
+    /** 订阅页面内导航事件（地址栏/前进后退跟着走）；返回取消订阅函数 */
+    onEvent: (cb) => {
+      const fn = (_e, ev) => cb(ev);
+      ipcRenderer.on('browser:event', fn);
+      return () => ipcRenderer.removeListener('browser:event', fn);
+    },
+    /** 站点里 target=_blank 想开新标签时收到通知 */
+    onOpenTab: (cb) => {
+      const fn = (_e, ev) => cb(ev);
+      ipcRenderer.on('browser:openTab', fn);
+      return () => ipcRenderer.removeListener('browser:openTab', fn);
+    },
+  },
 });

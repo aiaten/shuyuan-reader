@@ -2,7 +2,7 @@
 /**
  * 书源库：本地书源的增删改查 + 导入导出 + 可读性探测准入。
  *
- * 存储沿用「镜像小强阅读 chm 目录结构」的方案（JSON 落盘，免依赖、可人工检视）：
+ * 存储用 JSON 落盘（免依赖、可人工检视）：
  * ```
  * <dataDir>/sources/sources.json     全部书源（数组）
  * <dataDir>/sources/probe.json       每个书源的探测结果（按 bookSourceUrl 索引）
@@ -111,7 +111,12 @@ class SourceStore {
       diagnostics: result.details && result.details.diagnostics,
       at: Date.now(),
     };
-    fs.writeFileSync(this.probeFile, JSON.stringify(m, null, 2), 'utf8');
+    // 目录可能在运行中被清掉（冒烟测试会 rmSync 整个数据目录），写前补一次并原子落盘，
+    // 避免 ENOENT / 半截 JSON 让一次探测结果把整条调用链炸掉。
+    fs.mkdirSync(this.dir, { recursive: true });
+    const tmp = this.probeFile + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(m, null, 2), 'utf8');
+    fs.renameSync(tmp, this.probeFile);
     return m[key];
   }
 

@@ -142,7 +142,7 @@ console.log('\n=== saveChapter / chapter：章节读写 ===');
   eq('覆盖写不增加计数', lib.syncDownloadedCount(id), 2);
 }
 
-console.log('\n=== 文件布局（镜像小强阅读 chm 方案） ===');
+console.log('\n=== 文件布局（JSON + 每章一个 txt） ===');
 {
   const lib = new Library(root);
   const { id } = lib.add({ name: 'D', bookUrl: 'https://e.com/d', sourceKey: 'https://e.com' });

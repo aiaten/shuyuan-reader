@@ -15,6 +15,7 @@
       <button class="tab" data-view="search">搜索</button>
       <button class="tab" data-view="sources">书源</button>
       <button class="tab" data-view="online">在线书源</button>
+      <button class="tab" data-view="browser" title="浏览正版阅读网站（不抓取正文）">浏览器</button>
     </nav>
     <div class="topbar-right">
       <span class="hint" id="dataDir"></span>
@@ -30,7 +31,17 @@
         <button class="btn" id="btnRefreshShelf">刷新</button>
         <button class="btn" id="btnExportShelf">导出全部为 TXT</button>
         <span class="spacer"></span>
+        <select class="input select" id="shelfSort" title="排序方式">
+          <option value="added">按加入时间</option>
+          <option value="name">按书名</option>
+          <option value="author">按作者</option>
+          <option value="progress">按阅读进度</option>
+        </select>
         <input class="input" id="filterShelf" placeholder="过滤书名…" />
+        <div class="seg" id="shelfLayout" title="切换列表 / 图标查看方式">
+          <button class="seg-btn active" data-layout="list" title="列表查看">☰ 列表</button>
+          <button class="seg-btn" data-layout="grid" title="图标查看">▦ 图标</button>
+        </div>
       </div>
       <div class="list" id="shelfList"></div>
     </section>
@@ -89,6 +100,47 @@
       <div class="list" id="onlineList"></div>
     </section>
 
+    <!-- ============ 浏览器 ============ -->
+    <section class="view" id="view-browser">
+      <!-- 站点快捷入口（由 src/browser/sites.js 下发） -->
+      <div class="pane-toolbar" id="bwSiteBar"></div>
+
+      <!-- 地址栏 + 导航按钮 -->
+      <div class="pane-toolbar bw-navbar">
+        <button class="btn ghost icon" id="bwBack" title="后退">←</button>
+        <button class="btn ghost icon" id="bwForward" title="前进">→</button>
+        <button class="btn ghost icon" id="bwReload" title="刷新">⟳</button>
+        <button class="btn ghost icon" id="bwStop" title="停止加载">✕</button>
+        <input class="input grow" id="bwAddress" placeholder="输入网址后回车，例如 www.qidian.com" />
+        <button class="btn" id="bwGo">前往</button>
+        <button class="btn ghost" id="bwStar" title="收藏当前页">☆ 收藏</button>
+        <button class="btn ghost" id="bwOpenSystem" title="用系统浏览器打开当前页">↗ 外部</button>
+      </div>
+
+      <!-- 标签栏 -->
+      <div class="bw-tabbar">
+        <div class="bw-tabs" id="bwTabs"></div>
+        <button class="btn tiny" id="bwNewTab" title="新建标签">＋ 新建标签</button>
+      </div>
+
+      <!-- 书签栏 -->
+      <div class="bw-bmbar">
+        <span class="hint">书签：</span>
+        <div class="bw-bookmarks" id="bwBookmarks"></div>
+        <button class="btn tiny ghost" id="bwMore" title="历史 / 清理书签">更多</button>
+      </div>
+
+      <!-- 站点视图容器：每个标签一个 <webview>，非活动标签 hidden -->
+      <div class="bw-stage" id="bwStage">
+        <p class="empty" id="bwEmpty">选择上方站点，或输入网址开始浏览</p>
+      </div>
+
+      <!-- 合规提示 -->
+      <p class="hint bw-notice" id="bwNotice">
+        仅供浏览正版内容，本软件不抓取付费正文，也不绕过任何付费门槛。登录与订阅在站点网页内完成。
+      </p>
+    </section>
+
     <!-- ============ 阅读器 ============ -->
     <section class="view reader" id="view-reader">
       <div class="reader-bar">
@@ -98,6 +150,7 @@
         <select class="input select" id="readerChapter"></select>
         <button class="btn" id="btnPrevChapter">上一章</button>
         <button class="btn" id="btnNextChapter">下一章</button>
+        <button class="btn" id="btnReaderSettings" title="阅读设置：字体样式、字号、行距、页宽">⚙ 阅读设置</button>
         <button class="btn" id="btnExportBook">导出本书</button>
       </div>
       <div class="reader-body" id="readerBody"></div>

@@ -7,6 +7,150 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+/* ---------------- 阅读设置（字体样式 / 字号 / 行距 / 页宽） ---------------- */
+
+/**
+ * 阅读偏好存 localStorage：纯前端显示设置，不进数据目录、不影响导出。
+ * 通过 CSS 变量下发到 .reader-body .paper（见 style.css 的 var(--reader-*)）。
+ */
+const READER_PREF_KEY = 'shuyuan.readerPref';
+
+/** 字体样式预设：value 是 CSS font-family，label 给用户看 */
+const READER_FONTS = [
+  { value: '', label: '跟随系统' },
+  { value: '"Microsoft YaHei", "PingFang SC", sans-serif', label: '微软雅黑（默认无衬线）' },
+  { value: '"Source Han Serif SC", "Songti SC", SimSun, serif', label: '宋体（衬线，传统阅读）' },
+  { value: 'KaiTi, "Kaiti SC", STKaiti, serif', label: '楷体' },
+  { value: 'FangSong, "FangSong SC", STFangsong, serif', label: '仿宋' },
+  { value: '"Noto Sans Mono CJK SC", Consolas, monospace', label: '等宽' },
+  { value: 'Arial, "Helvetica Neue", sans-serif', label: '西文无衬线' },
+];
+
+const READER_PREF_DEFAULT = {
+  fontSize: 17,      // px，正文 14–30
+  lineHeight: 2.05,  // 倍数 1.4–3.0
+  fontFamily: '',    // '' = 跟随系统
+  pageWidth: 760,    // px 正文栏宽 560–1200
+};
+
+let readerPref = Object.assign({}, READER_PREF_DEFAULT);
+
+/** 读磁盘里的偏好，逐字段校验（脏数据一律回落到默认值，不让一条坏值毁掉整个阅读界面） */
+function readReaderPref() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(READER_PREF_KEY) || '{}') || {};
+    const clamp = (v, lo, hi, def) => {
+      const n = Number(v);
+      return Number.isFinite(n) ? Math.max(lo, Math.min(hi, n)) : def;
+    };
+    const fam = typeof raw.fontFamily === 'string' && READER_FONTS.some((f) => f.value === raw.fontFamily)
+      ? raw.fontFamily
+      : '';
+    return {
+      fontSize: Math.round(clamp(raw.fontSize, 14, 30, READER_PREF_DEFAULT.fontSize)),
+      lineHeight: Math.round(clamp(raw.lineHeight, 1.4, 3, READER_PREF_DEFAULT.lineHeight) * 100) / 100,
+      fontFamily: fam,
+      pageWidth: Math.round(clamp(raw.pageWidth, 560, 1200, READER_PREF_DEFAULT.pageWidth)),
+    };
+  } catch {
+    return Object.assign({}, READER_PREF_DEFAULT);
+  }
+}
+
+/** 把偏好写进 CSS 变量（立即生效，不用重渲染正文） */
+function applyReaderPref() {
+  const s = document.documentElement.style;
+  s.setProperty('--reader-font-size', readerPref.fontSize + 'px');
+  s.setProperty('--reader-line-height', String(readerPref.lineHeight));
+  s.setProperty('--reader-font-family', readerPref.fontFamily || 'inherit');
+  s.setProperty('--reader-page-width', readerPref.pageWidth + 'px');
+}
+
+function saveReaderPref() {
+  if (!writePref(READER_PREF_KEY, JSON.stringify(readerPref))) {
+    toast('阅读设置已应用，但保存失败', 'err');
+  }
+}
+
+/** 阅读设置对话框：即改即生效（不用点确定），关掉对话框设置也留着 */
+function readerSettingsDialog() {
+  const rows = [];
+  const fontOpts = READER_FONTS
+    .map((f) => `<option value="${esc(f.value)}"${f.value === readerPref.fontFamily ? ' selected' : ''}>${esc(f.label)}</option>`)
+    .join('');
+  rows.push(`
+    <div class="rs-row">
+      <label class="rs-label" for="rsFont">字体样式</label>
+      <select class="input select rs-ctl" id="rsFont">${fontOpts}</select>
+    </div>`);
+  rows.push(`
+    <div class="rs-row">
+      <label class="rs-label" for="rsSize">字体大小</label>
+      <input class="rs-range" id="rsSize" type="range" min="14" max="30" step="1" value="${readerPref.fontSize}" />
+      <span class="rs-val" id="rsSizeVal">${readerPref.fontSize} px</span>
+    </div>`);
+  rows.push(`
+    <div class="rs-row">
+      <label class="rs-label" for="rsLine">行距</label>
+      <input class="rs-range" id="rsLine" type="range" min="1.4" max="3" step="0.05" value="${readerPref.lineHeight}" />
+      <span class="rs-val" id="rsLineVal">${readerPref.lineHeight}</span>
+    </div>`);
+  rows.push(`
+    <div class="rs-row">
+      <label class="rs-label" for="rsWidth">页宽</label>
+      <input class="rs-range" id="rsWidth" type="range" min="560" max="1200" step="20" value="${readerPref.pageWidth}" />
+      <span class="rs-val" id="rsWidthVal">${readerPref.pageWidth} px</span>
+    </div>`);
+  rows.push(`
+    <div class="rs-preview" id="rsPreview">
+      <div class="rs-preview-in">床前明月光，疑是地上霜。举头望明月，低头思故乡。</div>
+    </div>`);
+
+  modal({
+    title: '阅读设置',
+    body: rows.join(''),
+    buttons: [
+      { text: '恢复默认', onClick: () => {
+          readerPref = Object.assign({}, READER_PREF_DEFAULT);
+          saveReaderPref();
+          applyReaderPref();
+          closeModal();
+          readerSettingsDialog();
+          toast('已恢复默认设置', 'ok');
+        } },
+      { text: '关闭', class: 'primary', onClick: closeModal },
+    ],
+  });
+
+  // 改完立即生效：拖动滑块时正文与预览同步变化
+  const sync = () => {
+    applyReaderPref();
+    const pv = $('#rsPreview .rs-preview-in');
+    if (pv) {
+      pv.style.fontSize = readerPref.fontSize + 'px';
+      pv.style.lineHeight = String(readerPref.lineHeight);
+      pv.style.fontFamily = readerPref.fontFamily || 'inherit';
+    }
+  };
+  $('#rsFont').onchange = (e) => { readerPref.fontFamily = e.target.value; saveReaderPref(); sync(); };
+  $('#rsSize').oninput = (e) => {
+    readerPref.fontSize = Number(e.target.value);
+    $('#rsSizeVal').textContent = readerPref.fontSize + ' px';
+    saveReaderPref(); sync();
+  };
+  $('#rsLine').oninput = (e) => {
+    readerPref.lineHeight = Number(e.target.value);
+    $('#rsLineVal').textContent = String(readerPref.lineHeight);
+    saveReaderPref(); sync();
+  };
+  $('#rsWidth').oninput = (e) => {
+    readerPref.pageWidth = Number(e.target.value);
+    $('#rsWidthVal').textContent = readerPref.pageWidth + ' px';
+    saveReaderPref(); sync();
+  };
+  sync();
+}
+
 /* ---------------- 主题（日间 / 夜间） ---------------- */
 
 const THEME_KEY = 'shuyuan.theme'; // 'shuyuan.' 前缀对齐项目其它本地存储键
@@ -154,6 +298,7 @@ const loaders = {
   shelf: loadShelf,
   sources: loadSources,
   online: () => { loadOnline(); loadRoute(false); },
+  browser: loadBrowser,
 };
 
 function switchView(name) {
@@ -168,6 +313,57 @@ $$('.tab').forEach((t) => (t.onclick = () => switchView(t.dataset.view)));
 
 let shelfCache = [];
 
+/**
+ * 书架查看方式：list（列表，默认）/ grid（图标）。
+ * 与主题一样存 localStorage——这是纯界面前端偏好，不该污染数据目录。
+ */
+const SHELF_LAYOUT_KEY = 'shuyuan.shelfLayout';
+const SHELF_SORT_KEY = 'shuyuan.shelfSort';
+
+function readPref(key, valid, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return valid.includes(v) ? v : fallback;
+  } catch { return fallback; }
+}
+
+function writePref(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch { return false; }
+}
+
+let shelfLayout = readPref(SHELF_LAYOUT_KEY, ['list', 'grid'], 'list');
+let shelfSort = readPref(SHELF_SORT_KEY, ['added', 'name', 'author', 'progress'], 'added');
+
+/** 排序键：把书架列表按当前排序方式重排（不改动 shelfCache 本体） */
+function sortShelf(list) {
+  const arr = list.slice();
+  if (shelfSort === 'name') {
+    arr.sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'zh'));
+  } else if (shelfSort === 'author') {
+    arr.sort((a, b) => String(a.author || '').localeCompare(String(b.author || ''), 'zh'));
+  } else if (shelfSort === 'progress') {
+    // 读完的沉底，其余按已下载章节数从多到少
+    arr.sort((a, b) => {
+      const ta = a.chapterCount || 0;
+      const tb = b.chapterCount || 0;
+      const fa = ta && a.downloadedCount === ta ? 1 : 0;
+      const fb = tb && b.downloadedCount === tb ? 1 : 0;
+      if (fa !== fb) return fa - fb;
+      return (b.downloadedCount || 0) - (a.downloadedCount || 0);
+    });
+  } else {
+    // added：新加入的在前（created 缺失时退化为原顺序）
+    arr.sort((a, b) => String(b.created || '').localeCompare(String(a.created || '')));
+  }
+  return arr;
+}
+
+/** 应用查看方式：给列表容器加/去 .grid，并同步分段控件高亮 */
+function applyShelfLayout() {
+  $('#shelfList').classList.toggle('grid', shelfLayout === 'grid');
+  $$('#shelfLayout .seg-btn').forEach((b) => b.classList.toggle('active', b.dataset.layout === shelfLayout));
+}
+
 async function loadShelf() {
   const books = (await run('读取书架…', () => window.api.shelf())) || [];
   shelfCache = books;
@@ -175,21 +371,27 @@ async function loadShelf() {
 }
 
 function renderShelf() {
+  applyShelfLayout();
   const kw = $('#filterShelf').value.trim();
-  const list = kw ? shelfCache.filter((b) => (b.name || '').includes(kw) || (b.author || '').includes(kw)) : shelfCache;
+  const filtered = kw ? shelfCache.filter((b) => (b.name || '').includes(kw) || (b.author || '').includes(kw)) : shelfCache;
+  const list = sortShelf(filtered);
   const box = $('#shelfList');
   if (!list.length) {
     box.innerHTML = `<p class="empty">${shelfCache.length ? '没有匹配的书籍' : '书架是空的<br/>去「搜索」里找一本书加入书架吧'}</p>`;
     return;
   }
   box.innerHTML = '';
+  const grid = shelfLayout === 'grid';
   for (const b of list) {
     const total = b.chapterCount || 0;
     const got = b.downloadedCount || 0;
     const pct = total ? Math.round((got / total) * 100) : 0;
     const el = document.createElement('div');
     el.className = 'card';
+    // 图标模式多一行封面位（用书名首字占位，不联网取图）
+    const cover = grid ? `<div class="cover">${esc(String(b.name || '书').trim().slice(0, 1))}</div>` : '';
     el.innerHTML = `
+      ${cover}
       <div class="card-main">
         <div class="card-title">${esc(b.name)}</div>
         <div class="card-sub">
@@ -237,6 +439,21 @@ function renderShelf() {
 
 $('#filterShelf').oninput = renderShelf;
 $('#btnRefreshShelf').onclick = loadShelf;
+
+/* 查看方式：列表 / 图标（只重渲染，不重新读书架） */
+$$('#shelfLayout .seg-btn').forEach((btn) => {
+  btn.onclick = () => {
+    shelfLayout = btn.dataset.layout;
+    if (!writePref(SHELF_LAYOUT_KEY, shelfLayout)) toast('已切换查看方式，但保存失败', 'err');
+    renderShelf();
+  };
+});
+
+$('#shelfSort').onchange = (e) => {
+  shelfSort = e.target.value;
+  writePref(SHELF_SORT_KEY, shelfSort);
+  renderShelf();
+};
 
 /* ==================== 换源（书架 → 其他书源） ==================== */
 
@@ -1497,7 +1714,7 @@ $('#btnInfo').onclick = async () => {
         <dt>已下载</dt><dd>${i.chapters} 章</dd>
       </dl>
       <p class="hint" style="margin-top:14px">
-        目录结构（镜像「小强阅读」的 chm 方案，改用可读 JSON + txt）：<br/>
+        目录结构（JSON + 每章一个 txt，可人工检视、便于增量下载）：<br/>
         <code>sources/sources.json</code> 书源 · <code>shelf.json</code> 书架<br/>
         <code>books/&lt;id&gt;/meta.json|toc.json|chapters/N.txt|progress.json</code><br/>
         <code>export/</code> 导出的 TXT
@@ -1512,7 +1729,6 @@ $('#btnInfo').onclick = async () => {
 /* ==================== 主题切换入口 ==================== */
 
 $('#btnTheme').onclick = toggleTheme;
-
 // Alt+T 快捷键：看书时手动去点顶栏会打断阅读节奏
 document.addEventListener('keydown', (e) => {
   if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 't' || e.key === 'T')) {
@@ -1521,11 +1737,513 @@ document.addEventListener('keydown', (e) => {
   }
 });
 
-/* ==================== 启动 ==================== */
+/* ==================== 阅读设置入口 ==================== */
+
+$('#btnReaderSettings').onclick = readerSettingsDialog;
+// Alt+R：阅读时调字号/字体不用离开键盘
+document.addEventListener('keydown', (e) => {
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'r' || e.key === 'R')) {
+    e.preventDefault();
+    readerSettingsDialog();
+  }
+});
+
+/* ==================== 浏览器 ==================== */
+/**
+ * 内置浏览器页签：<webview> 承载站点页面，本文件只做「地址栏 / 标签 / 书签」的外壳。
+ *
+ * 合规边界（用户已确认 m09121/m09122，勿改）：
+ *   - 只把用户送到站点官方页面，登录、订阅、阅读都在站点网页里完成；
+ *   - **不抓正文、不绕过付费墙**：这里没有任何读取 guest 页面 DOM 的代码，
+ *     也没有把页面内容写进书架/数据库的路径。
+ */
+
+/** 本机是否为 Electron（<webview> 只有真实 Electron 里才存在，纯浏览器打开时降级） */
+const BW_HAS_WEBVIEW = typeof window.api.browser !== 'undefined';
+
+let bwSites = []; // 预置站点表（主进程下发）
+let bwPolicy = ''; // 合规文案
+let bwTabs = []; // [{id, url, title, loading, canGoBack, canGoForward}]
+let bwActive = null; // 当前标签 id
+let bwSeq = 0; // 标签 id 自增
+let bwInit = false; // 是否已初始化过（只装一次事件监听）
+
+/** 新标签 id */
+function bwNewId() {
+  bwSeq += 1;
+  return 'bw' + bwSeq;
+}
+
+function bwTab(id) {
+  return bwTabs.find((t) => t.id === id) || null;
+}
+
+function bwActiveTab() {
+  return bwTab(bwActive);
+}
+
+/** 显示名：有标题用标题，没有就用主机名 */
+function bwLabel(t) {
+  if (t.title) return t.title;
+  if (!t.url) return '新标签页';
+  try {
+    return new URL(t.url).hostname.replace(/^www\./, '');
+  } catch (_) {
+    return t.url;
+  }
+}
+
+/** 该地址属于哪个预置站点（用于书签归类）；不属于返回 '' */
+function bwSiteOf(url) {
+  const u = String(url || '').toLowerCase();
+  const hit = bwSites.find((s) => {
+    try {
+      return u.includes(new URL(s.home).hostname.toLowerCase());
+    } catch (_) {
+      return false;
+    }
+  });
+  return hit ? hit.key : '';
+}
+
+/* ---------- 渲染：站点快捷按钮 ---------- */
+
+function bwRenderSites() {
+  const bar = $('#bwSiteBar');
+  bar.innerHTML = '';
+  for (const s of bwSites) {
+    const btn = document.createElement('button');
+    btn.className = 'btn';
+    btn.textContent = s.name;
+    btn.title = s.desc ? `${s.name} — ${s.desc}` : s.name;
+    // 已开着该站点的标签就切过去，否则新开一个
+    btn.onclick = () => bwOpenSite(s);
+    bar.appendChild(btn);
+  }
+  // 合规提示也从主进程取，保证文字只有一处定义
+  if (bwPolicy) $('#bwNotice').textContent = bwPolicy + '登录与订阅在站点网页内完成。';
+}
+
+/* ---------- 渲染：标签栏 ---------- */
+
+function bwRenderTabs() {
+  const box = $('#bwTabs');
+  box.innerHTML = '';
+  for (const t of bwTabs) {
+    const el = document.createElement('div');
+    el.className = 'bw-tab' + (t.id === bwActive ? ' active' : '');
+    el.title = t.url || '新标签页';
+
+    if (t.loading) {
+      const dot = document.createElement('span');
+      dot.className = 'bw-tab-dot';
+      el.appendChild(dot);
+    }
+    const title = document.createElement('span');
+    title.className = 'bw-tab-title';
+    title.textContent = bwLabel(t);
+    el.appendChild(title);
+
+    const close = document.createElement('button');
+    close.className = 'bw-tab-close';
+    close.textContent = '×';
+    close.title = '关闭标签';
+    close.onclick = (e) => {
+      e.stopPropagation();
+      bwCloseTab(t.id);
+    };
+    el.appendChild(close);
+
+    el.onclick = () => bwSelectTab(t.id);
+    box.appendChild(el);
+  }
+}
+
+/* ---------- 渲染：书签栏 ---------- */
+
+async function bwRenderBookmarks() {
+  const box = $('#bwBookmarks');
+  const list = (await run(null, () => window.api.browser.bookmarks())) || [];
+  box.innerHTML = '';
+  if (!list.length) {
+    box.innerHTML = '<span class="hint">（点地址栏右侧「☆ 收藏」把当前页存下来）</span>';
+    return;
+  }
+  for (const b of list) {
+    const el = document.createElement('span');
+    el.className = 'bw-bm';
+    el.title = b.url;
+
+    const title = document.createElement('span');
+    title.className = 'bw-bm-title';
+    title.textContent = b.title || b.url;
+    title.onclick = () => bwGo(b.url);
+    el.appendChild(title);
+
+    const del = document.createElement('button');
+    del.className = 'bw-bm-del';
+    del.textContent = '×';
+    del.title = '删除书签';
+    del.onclick = async (e) => {
+      e.stopPropagation();
+      await run('删除书签…', () => window.api.browser.removeBookmark(b.url));
+      bwRenderBookmarks();
+    };
+    el.appendChild(del);
+
+    box.appendChild(el);
+  }
+}
+
+/* ---------- 标签与 webview ---------- */
+
+/** 新建标签；url 为空则停在空白页 */
+function bwCreateTab(url) {
+  const t = {
+    id: bwNewId(),
+    url: url || '',
+    title: '',
+    loading: false,
+    canGoBack: false,
+    canGoForward: false,
+  };
+  bwTabs.push(t);
+
+  // 建 <webview>：只给地址，不给 preload/node，页面拿不到任何本机能力
+  const view = document.createElement('webview');
+  view.className = 'bw-webview';
+  view.setAttribute('data-tab', t.id);
+  // 站点里的弹窗不另开窗口（主进程已 deny，这里再兜一层）
+  view.setAttribute('allowpopups', 'false');
+  const stage = $('#bwStage');
+  t.view = view;
+
+  /**
+   * 把 tabId ↔ guestId 绑上（主进程靠它把标签和 <webview> 关联起来）。
+   * 先注册 dom-ready 再挂进 DOM：webview 一附加就可能立刻 ready，
+   * 先 append 后监听会漏事件，标签永远绑不上、点站点按钮没反应。
+   */
+  const bindGuest = () => {
+    if (t.bound) return; // 绑定只做一次，避免重复触发同一地址的导航
+    try {
+      const gid = view.getWebContentsId();
+      t.bound = true;
+      window.api.browser.bind(t.id, gid).then((r) => {
+        if (r && r.bound && t.url) window.api.browser.navigate(t.id, t.url);
+      });
+    } catch (e) {
+      // guest 还没就绪，等下一次 dom-ready
+      console.warn('绑定 webview 失败（将等待 dom-ready）', e && e.message);
+    }
+  };
+  view.addEventListener('dom-ready', bindGuest);
+  stage.appendChild(view);
+  // 已就绪的情况下 dom-ready 不会再触发，补一次立即绑定
+  bindGuest();
+
+  bwTabsRefreshEmpty();
+  return t;
+}
+
+/** 没有任何标签时显示占位提示 */
+function bwTabsRefreshEmpty() {
+  $('#bwEmpty').hidden = bwTabs.length > 0;
+}
+
+/** 切到某个标签 */
+function bwSelectTab(id) {
+  if (!bwTab(id)) return;
+  bwActive = id;
+  for (const t of bwTabs) {
+    if (t.view) t.view.hidden = t.id !== id;
+  }
+  const t = bwTab(id);
+  $('#bwAddress').value = t.url || '';
+  bwRenderTabs();
+  // 切过去时同步一次真实状态（用户可能在页面里点走了）
+  if (t.url) {
+    window.api.browser.state(id).then((st) => {
+      if (st && st.url) bwApplyState(id, st);
+    }).catch(() => {});
+  }
+}
+
+/** 关闭标签 */
+function bwCloseTab(id) {
+  const idx = bwTabs.findIndex((t) => t.id === id);
+  if (idx < 0) return;
+  const t = bwTabs[idx];
+  if (t.view) {
+    try {
+      window.api.browser.unbind(id);
+    } catch (_) {
+      /* 绑没绑上都无所谓，关掉就行 */
+    }
+    t.view.remove();
+  }
+  bwTabs.splice(idx, 1);
+  if (bwActive === id) {
+    // 关掉当前标签后，优先接右邻，没有就接左邻
+    const next = bwTabs[idx] || bwTabs[idx - 1] || null;
+    if (next) bwSelectTab(next.id);
+    else {
+      bwActive = null;
+      $('#bwAddress').value = '';
+    }
+  }
+  bwTabsRefreshEmpty();
+  bwRenderTabs();
+  bwSaveSession();
+}
+
+/* ---------- 导航 ---------- */
+
+/** 把状态应用到界面（地址栏、前进后退可用性、标签标题） */
+function bwApplyState(tabId, st) {
+  const t = bwTab(tabId);
+  if (!t) return;
+  if (st.url) t.url = st.url;
+  if (typeof st.title === 'string' && st.title) t.title = st.title;
+  if (typeof st.loading === 'boolean') t.loading = st.loading;
+  if (typeof st.canGoBack === 'boolean') t.canGoBack = st.canGoBack;
+  if (typeof st.canGoForward === 'boolean') t.canGoForward = st.canGoForward;
+  if (tabId === bwActive) {
+    $('#bwAddress').value = t.url || '';
+    $('#bwBack').disabled = !t.canGoBack;
+    $('#bwForward').disabled = !t.canGoForward;
+  }
+  bwRenderTabs();
+}
+
+/**
+ * 在指定标签（默认当前标签）打开地址；没有标签就先建一个。
+ * 地址先经主进程归一化（`qidian.com` → `https://qidian.com`）。
+ */
+async function bwGo(input, tabId) {
+  const raw = String(input == null ? '' : input).trim();
+  if (!raw) return;
+  const norm = await run(null, () => window.api.browser.normalize(raw));
+  if (!norm || !norm.ok) {
+    toast((norm && norm.error) || '网址无效', 'err');
+    return;
+  }
+  let t = tabId ? bwTab(tabId) : bwActiveTab();
+  if (!t) t = bwCreateTab(norm.url);
+  else t.url = norm.url;
+  if (t.id === bwActive) $('#bwAddress').value = norm.url;
+  const r = await run(null, () => window.api.browser.navigate(t.id, norm.url));
+  if (r && r.ok === false) toast(r.error || '打不开这个地址', 'err');
+  bwRemember(t);
+}
+
+/** 打开预置站点：已开着就切过去，否则新标签 */
+function bwOpenSite(site) {
+  const existing = bwTabs.find((t) => t.url && bwSiteOf(t.url) === site.key);
+  if (existing) {
+    bwSelectTab(existing.id);
+    bwGo(site.url, existing.id);
+    return;
+  }
+  const t = bwCreateTab(site.url);
+  bwSelectTab(t.id);
+}
+
+/* ---------- 历史记录（只存地址/标题） ---------- */
+
+/** 把当前页记进历史；只存「地址 + 标题」，重复地址由 store 自行去重 */
+async function bwRemember(t) {
+  if (!t || !t.url || /^about:/.test(t.url)) return;
+  try {
+    await window.api.browser.pushHistory({
+      url: t.url,
+      title: bwLabel(t),
+      site: bwSiteOf(t.url),
+    });
+  } catch (_) {
+    /* 记历史失败不影响浏览 */
+  }
+}
+
+/* ---------- 会话（下次进来接上） ---------- */
+
+async function bwSaveSession() {
+  if (!bwInit || !bwTabs.length) return;
+  try {
+    await window.api.browser.saveSession(
+      bwTabs.filter((t) => t.url).map((t) => ({ id: t.id, url: t.url, title: t.title }))
+    );
+  } catch (_) {
+    /* 存会话失败不影响使用 */
+  }
+}
+
+/* ---------- 更多：历史 / 清理 ---------- */
+
+async function bwMoreDialog() {
+  const hist = (await run(null, () => window.api.browser.history(50))) || [];
+  const stats = (await run(null, () => window.api.browser.stats())) || { bookmarks: 0, history: 0 };
+  const rows = hist.length
+    ? hist
+        .map(
+          (h) =>
+            `<div class="sr-line" data-url="${esc(h.url)}"><span class="sr-name">${esc(h.title || h.url)}</span><span class="dim">${esc(h.url)}</span></div>`
+        )
+        .join('')
+    : '<p class="empty">还没有浏览记录</p>';
+  modal({
+    title: `浏览记录（书签 ${stats.bookmarks} 条 · 历史 ${stats.history} 条）`,
+    body: `<div class="sr-list">${rows}</div>
+      <p class="hint" style="margin-top:12px">
+        这里只保存「地址 + 标题」，不保存网页正文。
+      </p>`,
+    buttons: [
+      {
+        text: '清空历史',
+        onClick: async () => {
+          await run('清空历史…', () => window.api.browser.clearHistory());
+          closeModal();
+          toast('历史已清空', 'ok');
+        },
+      },
+      { text: '关闭', class: 'primary', onClick: closeModal },
+    ],
+  });
+  // 点一条记录就跳过去
+  $$('#modalBody .sr-line').forEach((el) => {
+    el.style.cursor = 'pointer';
+    el.onclick = () => {
+      const url = el.dataset.url;
+      closeModal();
+      bwGo(url);
+    };
+  });
+}
+
+/* ---------- 事件订阅 ---------- */
+
+function bwInstallEvents() {
+  if (bwInit) return;
+  bwInit = true;
+
+  // guest 的导航状态回传：地址栏、前进后退、标签标题都跟着走
+  window.api.browser.onEvent((ev) => {
+    if (!ev || !ev.tabId) return;
+    const t = bwTab(ev.tabId);
+    if (!t) return;
+    if (ev.type === 'title' && ev.title) {
+      t.title = ev.title;
+      bwRenderTabs();
+      return;
+    }
+    if (ev.type === 'fail') {
+      t.loading = false;
+      toast(ev.error || '页面加载失败', 'err');
+      bwRenderTabs();
+      return;
+    }
+    bwApplyState(ev.tabId, {
+      url: ev.url,
+      title: ev.title,
+      loading: ev.type === 'loading' ? true : ev.type === 'loaded' ? false : t.loading,
+      canGoBack: ev.canGoBack,
+      canGoForward: ev.canGoForward,
+    });
+    // 一次导航稳定后记一条历史（只记地址 + 标题）
+    if (ev.type === 'loaded' && ev.url) {
+      bwRemember(t);
+      bwSaveSession();
+    }
+  });
+
+  // 站点里 target=_blank 想开新标签
+  window.api.browser.onOpenTab((ev) => {
+    if (!ev || !ev.url) return;
+    const t = bwCreateTab(ev.url);
+    bwSelectTab(t.id);
+  });
+}
+
+/* ---------- 页签初始化 ---------- */
+
+async function loadBrowser() {
+  const info = await run('读取站点…', () => window.api.browser.listSites());
+  if (info) {
+    bwSites = info.sites || [];
+    bwPolicy = info.policy || '';
+  }
+  bwRenderSites();
+  bwInstallEvents();
+
+  // 首次进入：恢复上次的标签；没有就开一个空白标签
+  if (!bwTabs.length) {
+    const saved = (await run(null, () => window.api.browser.session())) || [];
+    for (const s of saved) {
+      const t = bwCreateTab(s.url);
+      if (s.title) t.title = s.title;
+    }
+    if (!bwTabs.length) bwCreateTab('');
+    bwSelectTab(bwTabs[bwTabs.length - 1].id);
+  }
+
+  bwRenderBookmarks();
+  bwTabsRefreshEmpty();
+  $('#bwBack').disabled = true;
+  $('#bwForward').disabled = true;
+}
+
+/* ---------- 界面绑定（只绑一次） ---------- */
+
+$('#bwGo').onclick = () => bwGo($('#bwAddress').value);
+$('#bwAddress').onkeydown = (e) => {
+  if (e.key === 'Enter') bwGo($('#bwAddress').value);
+};
+$('#bwBack').onclick = () => { if (bwActive) window.api.browser.back(bwActive); };
+$('#bwForward').onclick = () => { if (bwActive) window.api.browser.forward(bwActive); };
+$('#bwReload').onclick = () => { if (bwActive) window.api.browser.reload(bwActive, false); };
+$('#bwStop').onclick = () => { if (bwActive) window.api.browser.stop(bwActive); };
+$('#bwNewTab').onclick = () => bwSelectTab(bwCreateTab('').id);
+$('#bwMore').onclick = bwMoreDialog;
+
+/** 收藏 / 取消收藏当前页 */
+$('#bwStar').onclick = async () => {
+  const t = bwActiveTab();
+  if (!t || !t.url) {
+    toast('当前没有可收藏的页面', 'err');
+    return;
+  }
+  const r = await run('收藏…', () =>
+    window.api.browser.addBookmark({ url: t.url, title: bwLabel(t), site: bwSiteOf(t.url) })
+  );
+  if (!r) return;
+  toast(r.added ? '已加入书签' : r.reason || '已在书签里', r.added ? 'ok' : '');
+  bwRenderBookmarks();
+};
+
+/** 用系统浏览器打开当前页（内置视图打不开时的退路） */
+$('#bwOpenSystem').onclick = async () => {
+  const t = bwActiveTab();
+  if (!t || !t.url) {
+    toast('当前没有可打开的页面', 'err');
+    return;
+  }
+  await run(null, () => window.api.browser.openInSystem(t.url));
+};
+
+// 离开浏览器页签时把标签存下来，下次进来能接上
+window.addEventListener('beforeunload', () => {
+  if (bwInit) bwSaveSession();
+});
+
+
 
 (async function init() {
   const i = await window.api.info();
   if (i) $('#dataDir').textContent = i.dataDir;
+  // 阅读偏好先应用，再开书，避免第一屏用默认字号闪一下
+  readerPref = readReaderPref();
+  applyReaderPref();
+  // 书架排序方式回填到下拉框（查看方式由 renderShelf 的 applyShelfLayout 处理）
+  $('#shelfSort').value = shelfSort;
   await fillSourceSelect();
   switchView('shelf');
 })();

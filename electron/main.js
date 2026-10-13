@@ -5,12 +5,76 @@
  */
 
 const path = require('path');
-const { app, BrowserWindow, ipcMain, dialog, shell, Menu } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Menu, webContents } = require('electron');
 
 const { App } = require('../src/app');
+const { listSites, POLICY, getSite } = require('../src/browser/sites');
+const { BrowserStore, normalizeInput } = require('../src/browser/store');
 
 let win = null;
 let facade = null;
+
+/**
+ * 内置浏览器用的是渲染进程里的 <webview> 标签（guest webContents）。
+ * 这里只做三件事：放行响应头、把 guest 的导航事件回传给界面、
+ * 以及在窗口关闭时记住「上次开着哪几个标签」。
+ * 一切正文都留在站点自己的网页里，主进程不读、不存、不解析页面内容。
+ */
+
+/** 给所有 guest（webview）放行响应头。缺了它 Chromium 会拒渲染页面。 */
+function installGuestWebPreferences() {
+  app.on('web-contents-created', (_e, contents) => {
+    if (contents.getType() !== 'webview') return;
+    contents.on('did-finish-load', () => {
+      try {
+        contents.setWindowOpenHandler(({ url }) => {
+          // 站点里的 target=_blank / window.open 不另开窗口，让宿主标签接过去；
+          // 交给渲染进程决定是同标签跳还是开新标签。
+          if (/^https?:\/\//i.test(url) && win && !win.isDestroyed()) {
+            win.webContents.send('browser:openTab', { url });
+          } else if (/^https?:\/\//i.test(url)) {
+            shell.openExternal(url);
+          }
+          return { action: 'deny' };
+        });
+      } catch (_) {
+        /* 有些早期时机拿不到，忽略即可 */
+      }
+    });
+  });
+}
+
+/** 统一的“往界面推事件”出口；窗口没了就静默丢弃 */
+function sendToBrowser(channel, payload) {
+  if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
+}
+
+/**
+ * tabId ↔ guest webContents.id 的映射。
+ * 界面每建一个 <webview> 就 browser:bind 一次，主进程据此知道
+ * 「这个 guest 属于哪个标签」，之后 navigate/back/forward 才能定向下发。
+ */
+const tabGuests = new Map(); // tabId(string) → webContents.id(number)
+
+function tabIdOfGuest(guestId) {
+  for (const [tid, wid] of tabGuests) if (wid === guestId) return tid;
+  return null;
+}
+
+/** 拿到某个标签的 guest；标签没绑定/已销毁都返回 null */
+function guestOf(tabId) {
+  const id = tabGuests.get(String(tabId));
+  if (!id) return null;
+  const wc = webContents.fromId(id);
+  return wc && !wc.isDestroyed() ? wc : null;
+}
+
+/** 懒建浏览器存储（只在真正用到浏览器页签时才读盘） */
+let browserStore = null;
+function store() {
+  if (!browserStore) browserStore = new BrowserStore(getApp().dataDir);
+  return browserStore;
+}
 
 function getApp() {
   if (!facade) {
@@ -48,10 +112,49 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // 内置浏览器页签用 <webview> 承载站点页面（见「浏览器」IPC 段）
+      webviewTag: true,
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  /* 内置浏览器：把每个 webview(guest) 的导航状态回传给界面，
+     让地址栏 / 前进后退按钮跟着真实状态走。
+     这里只转发「地址、标题、能否前进后退」——不碰页面内容。 */
+  win.webContents.on('did-attach-webview', (_e, guest) => {
+    const emit = (type, extra) => {
+      const tabId = tabIdOfGuest(guest.id);
+      if (!tabId) return; // 还没认领的 guest（例如刚创建）先丢
+      sendToBrowser('browser:event', {
+        type,
+        tabId,
+        url: guest.getURL(),
+        title: guest.getTitle(),
+        canGoBack: guest.navigationHistory ? guest.navigationHistory.canGoBack() : guest.canGoBack(),
+        canGoForward: guest.navigationHistory ? guest.navigationHistory.canGoForward() : guest.canGoForward(),
+        ...extra,
+      });
+    };
+    guest.on('did-start-loading', () => emit('loading'));
+    guest.on('did-stop-loading', () => emit('loaded'));
+    guest.on('did-navigate', (_ev, url) => emit('navigate', { url }));
+    guest.on('did-navigate-in-page', (_ev, url, isMainFrame) => {
+      if (isMainFrame) emit('navigate', { url });
+    });
+    guest.on('page-title-updated', (_ev, title) => emit('title', { title }));
+    guest.on('did-fail-load', (_ev, code, desc, url, isMainFrame) => {
+      if (!isMainFrame || code === -3) return; // -3 = 用户主动中止，不是错误
+      emit('fail', { url, error: `${desc}（${code}）` });
+    });
+    guest.on('render-process-gone', () => emit('fail', { error: '页面进程已退出，刷新可恢复' }));
+    // 关掉 guest 时把它从 tabId 表里摘掉，避免 id 被复用时认错人
+    guest.once('destroyed', () => {
+      for (const [tid, wid] of tabGuests) if (wid === guest.id) tabGuests.delete(tid);
+    });
+  });
+
   win.on('closed', () => {
+    tabGuests.clear();
     win = null;
   });
   // 外部链接用系统浏览器打开
@@ -173,6 +276,130 @@ function registerIpc() {
     shell.openExternal(url);
     return { done: true };
   });
+
+  /* ==================== 内置浏览器 ====================
+   * 只做「把用户送到站点官方页面 + 书签/历史」。
+   * 没有、也不会有：正文抓取、付费墙绕过、页面内容落库。 */
+
+  /** 预置站点表 + 合规文案（界面按钮与提示都从这里取） */
+  handle('browser:listSites', () => ({ sites: listSites(), policy: POLICY }));
+
+  /** 地址归一化（用户只敲 `qidian.com` 时补协议）。纯字符串处理，不联网。 */
+  handle('browser:normalize', (_a, input) => {
+    const url = normalizeInput(input);
+    if (!url) return { ok: false, url: '', error: '请输入网址' };
+    if (!/^https?:\/\//i.test(url)) {
+      return { ok: false, url: '', error: '只支持 http/https 地址' };
+    }
+    return { ok: true, url };
+  });
+
+  /**
+   * 标签 ↔ guest 绑定。界面创建 <webview> 后调用一次。
+   * @param {string} tabId 界面侧的标签 id
+   * @param {number} guestId webview 的 webContents id
+   */
+  handle('browser:bind', (_a, tabId, guestId) => {
+    const t = String(tabId || '');
+    const g = Number(guestId);
+    if (!t || !Number.isFinite(g)) return { bound: false, reason: '缺少 tabId/guestId' };
+    tabGuests.set(t, g);
+    return { bound: true, tabId: t, guestId: g };
+  });
+
+  handle('browser:unbind', (_a, tabId) => {
+    const t = String(tabId || '');
+    return { removed: tabGuests.delete(t) };
+  });
+
+  /** 在指定标签里打开地址 */
+  handle('browser:navigate', (_a, tabId, url) => {
+    const wc = guestOf(tabId);
+    if (!wc) return { ok: false, error: '标签页还没准备好' };
+    const target = normalizeInput(url);
+    if (!/^https?:\/\//i.test(target)) return { ok: false, error: '只支持 http/https 地址' };
+    wc.loadURL(target);
+    return { ok: true, url: target };
+  });
+
+  /* 前进 / 后退 / 刷新 / 停止 / 回站点首页 */
+  handle('browser:back', (_a, tabId) => {
+    const wc = guestOf(tabId);
+    if (!wc) return { ok: false };
+    if (wc.navigationHistory) {
+      if (!wc.navigationHistory.canGoBack()) return { ok: false, error: '已经是第一页' };
+      wc.navigationHistory.goBack();
+    } else {
+      if (!wc.canGoBack()) return { ok: false, error: '已经是第一页' };
+      wc.goBack();
+    }
+    return { ok: true };
+  });
+
+  handle('browser:forward', (_a, tabId) => {
+    const wc = guestOf(tabId);
+    if (!wc) return { ok: false };
+    if (wc.navigationHistory) {
+      if (!wc.navigationHistory.canGoForward()) return { ok: false, error: '已经是最后一页' };
+      wc.navigationHistory.goForward();
+    } else {
+      if (!wc.canGoForward()) return { ok: false, error: '已经是最后一页' };
+      wc.goForward();
+    }
+    return { ok: true };
+  });
+
+  handle('browser:reload', (_a, tabId, ignoreCache) => {
+    const wc = guestOf(tabId);
+    if (!wc) return { ok: false };
+    if (ignoreCache) wc.reloadIgnoringCache();
+    else wc.reload();
+    return { ok: true };
+  });
+
+  handle('browser:stop', (_a, tabId) => {
+    const wc = guestOf(tabId);
+    if (wc) wc.stop();
+    return { ok: true };
+  });
+
+  /** 取站点当前的地址/标题（界面切标签时同步一遍） */
+  handle('browser:state', (_a, tabId) => {
+    const wc = guestOf(tabId);
+    if (!wc) return { url: '', title: '', loading: false, canGoBack: false, canGoForward: false };
+    return {
+      url: wc.getURL(),
+      title: wc.getTitle(),
+      loading: wc.isLoading(),
+      canGoBack: wc.navigationHistory ? wc.navigationHistory.canGoBack() : wc.canGoBack(),
+      canGoForward: wc.navigationHistory ? wc.navigationHistory.canGoForward() : wc.canGoForward(),
+    };
+  });
+
+  /* ---- 书签 ---- */
+  handle('browser:bookmarks', () => store().bookmarks());
+  handle('browser:addBookmark', (_a, bm) => store().addBookmark(bm || {}));
+  handle('browser:removeBookmark', (_a, url) => ({ removed: store().removeBookmark(url) }));
+  handle('browser:renameBookmark', (_a, url, title) => ({ renamed: store().renameBookmark(url, title) }));
+  handle('browser:clearBookmarks', () => ({ removed: store().clearBookmarks() }));
+
+  /* ---- 历史 ---- */
+  handle('browser:history', (_a, limit) => store().history(limit));
+  handle('browser:pushHistory', (_a, h) => store().pushHistory(h || {}));
+  handle('browser:clearHistory', () => ({ removed: store().clearHistory() }));
+
+  /* ---- 会话（上次开的标签，重启后恢复） ---- */
+  handle('browser:session', () => store().session());
+  handle('browser:saveSession', (_a, tabs) => ({ saved: store().saveSession(tabs || []).length }));
+  handle('browser:stats', () => store().stats());
+
+  /** 用系统浏览器打开（内置视图里打不开的站点，给用户一个退路） */
+  handle('browser:openExternal', (_a, url) => {
+    const u = normalizeInput(url);
+    if (!/^https?:\/\//i.test(u)) return { ok: false, error: '只支持 http/https 地址' };
+    shell.openExternal(u);
+    return { ok: true };
+  });
 }
 
 /* ==================== 生命周期 ==================== */
@@ -190,6 +417,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.whenReady().then(() => {
     Menu.setApplicationMenu(null);
+    installGuestWebPreferences();
     registerIpc();
     createWindow();
     app.on('activate', () => {
