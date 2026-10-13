@@ -39,7 +39,16 @@ if (resolved.copied) console.log(`  （原路径含非 ASCII，已复制一份�
 
 const child = spawn(resolved.exe, [path.join(__dirname, 'gui-smoke-main.js')], {
   cwd: path.join(__dirname, '..'),
-  env: cleanEnv({ SHUYUAN_SMOKE_OUT: OUT }),
+  env: cleanEnv({
+    SHUYUAN_SMOKE_OUT: OUT,
+    // 关键：给这次冒烟一个**独立的 Electron 用户目录**。
+    // main.js 里有 app.requestSingleInstanceLock()，而单实例锁是按 userData
+    // 目录判定的。若沿用默认 profile，上一个还没退干净的实例会持有锁，
+    // 新实例在 whenReady 之前就 app.quit()，结果「退出且没有结果文件」——
+    // 表现成随机超时/失败（本机实测：连跑 4~5 次必现）。
+    // 每个进程用 pid 隔开，互不干扰，也不会和用户手动开的软件抢锁。
+    ELECTRON_USER_DATA_DIR: path.join(os.tmpdir(), `shuyuan-smoke-userdata-${process.pid}`),
+  }),
   stdio: 'ignore',
 });
 

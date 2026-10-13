@@ -404,6 +404,16 @@ function registerIpc() {
 
 /* ==================== 生命周期 ==================== */
 
+// 让测试可以指定独立的 Electron 用户目录（userData），从而与用户手动打开的
+// 实例互不干扰地共存——单实例锁是按 userData 判定的，不隔离就会互相抢锁。
+if (process.env.ELECTRON_USER_DATA_DIR) {
+  try {
+    app.setPath('userData', process.env.ELECTRON_USER_DATA_DIR);
+  } catch (_) {
+    /* 设置失败就退回默认目录，不影响正常使用 */
+  }
+}
+
 // 单实例
 if (!app.requestSingleInstanceLock()) {
   app.quit();

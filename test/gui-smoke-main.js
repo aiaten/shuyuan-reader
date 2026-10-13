@@ -10,7 +10,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, webContents } = require('electron');
 
 const OUT = process.env.SHUYUAN_SMOKE_OUT || path.join(os.tmpdir(), 'shuyuan-gui-smoke.json');
 
@@ -147,16 +147,27 @@ const PROBE = `(async () => {
     };
     let prev = null;
     let stable = 0;
-    for (let i = 0; i < 40; i++) {
-      // 最多等 20s：真网单页 2.5–10s，两次稳定快照足够排除旧请求回包
+    let snapSeen = 0;      // 观察到的不同快照数
+    let lastChange = -1;   // 最后一次快照变化的轮次
+    for (let i = 0; i < 60; i++) {
+      // 最多等 30s：真网单页 2.5–10s，加上「切视图触发的旧请求」可能晚回包。
       // eslint-disable-next-line no-await-in-loop
       await new Promise((s) => setTimeout(s, 500));
       const cur = snap();
-      if (cur === prev && /最终小说网/.test(cur)) { stable++; if (stable >= 2) break; } else { stable = 0; }
+      // 注意：keys 是发给远端的搜索词，不是本地子串过滤，命中可能有上百条，
+      // 所以只要求「含最终小说网」+「连续两次一致」。
+      // 但要排除旧请求回包造成的畸形快照：列表被重渲染成两页拼接
+      // （100+100=200 条上下），那种「稳定」是假的，会让 rejected 卡片被多算。
+      const count = Number(cur.split('|')[0]);
+      const sane = count > 0 && count <= 100;
+      if (cur !== prev) { snapSeen++; lastChange = i; }
+      if (cur === prev && sane && /最终小说网/.test(cur)) { stable++; if (stable >= 2) break; } else { stable = 0; }
       prev = cur;
     }
     r.func.listSettled = stable >= 2;
     r.func.listSnapshot = prev;
+    r.func.listSnapDistinct = snapSeen;
+    r.func.listSnapLastChange = lastChange;
     const rejCards = document.querySelectorAll('#onlineList .card.rejected');
     r.func.rejectedCards = rejCards.length;
     r.func.rejectedFirst = rejCards[0]
@@ -502,6 +513,121 @@ const PROBE = `(async () => {
       r.func.rs = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.rs || {});
     }
 
+    // ---- m09109 需求③：内置浏览器页 ----
+    // 回归点：<webview> 不带 src 时永不初始化 guest（点站点无反应）；
+    // 且反复切到该页签不得重复建 guest（loadBrowser 只能初始化一次）。
+    try {
+      const tab = document.querySelector('.tab[data-view="browser"]');
+      r.func.bw = Object.assign({ tabFound: !!tab }, r.func.bw || {});
+      if (tab) {
+        tab.click();
+        await new Promise((s) => setTimeout(s, 2500));
+        const pane = document.querySelector('#view-browser');
+        const siteBar = document.querySelector('#bwSiteBar');
+        const btns = siteBar ? Array.from(siteBar.querySelectorAll('button')) : [];
+        r.func.bw.siteCount = btns.length;
+        r.func.bw.siteNames = btns.map((b) => b.textContent.trim());
+        r.func.bw.notice = (document.querySelector('#bwNotice') || {}).textContent || '';
+        r.func.bw.addrFound = !!document.querySelector('#bwAddress');
+        r.func.bw.paneActive = !!(pane && pane.classList.contains('active'));
+
+        const wvs = Array.from(document.querySelectorAll('#bwStage webview'));
+        r.func.bw.webviewCount = wvs.length;
+        // 每个 webview 都必须有 src，否则 guest 不会初始化
+        r.func.bw.allHaveSrc = wvs.length > 0 && wvs.every((w) => !!w.getAttribute('src'));
+        // 能拿到 webContentsId 就说明 guest 已附加 + dom-ready 已触发
+        r.func.bw.boundIds = wvs.filter((w) => {
+          try { return typeof w.getWebContentsId() === 'number'; } catch (_) { return false; }
+        }).length;
+
+        // 点一个预置站点（飞卢：无 WAF，能真加载），等它渲染出正文
+        const fl = btns.find((b) => /飞卢/.test(b.textContent)) || btns[1];
+        if (fl) {
+          fl.click();
+          await new Promise((s) => setTimeout(s, 6000));
+          const active = Array.from(document.querySelectorAll('#bwStage webview')).find((w) => !w.hidden)
+            || document.querySelector('#bwStage webview');
+          if (active) {
+            try { r.func.bw.liveUrl = active.getURL(); } catch (_) {}
+            try { r.func.bw.liveTitle = active.getTitle(); } catch (_) {}
+            try {
+              const inner = await active.executeJavaScript(
+                '({ len: document.body ? document.body.innerText.length : 0 })'
+              );
+              r.func.bw.liveTextLen = inner && inner.len;
+            } catch (e) {
+              r.func.bw.liveInnerErr = String(e.message).slice(0, 120);
+            }
+          }
+        }
+        r.func.bw.guestsAfterSwitches = document.querySelectorAll('#bwStage webview').length;
+      }
+    } catch (e) {
+      r.func.bw = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.bw || {});
+    }
+
+    // ---- 在线书源 → 在内置浏览器打开该书的网站 ----
+    // 要求：每条在线书源卡片都有一个「打开网站」按钮；点了之后切到浏览器页，
+    // 并且给出目标地址的标签真的建起来（不是只切视图什么都不做）。
+    try {
+      const so = (r.func.so = {});
+      // 回到在线页
+      document.querySelector('.tab[data-view="online"]').click();
+      await new Promise((s) => setTimeout(s, 1200));
+
+      const cards = Array.from(document.querySelectorAll('#onlineList .card'));
+      so.cardCount = cards.length;
+
+      const openBtns = cards
+        .map((c) => c.querySelector('[data-act=open]'))
+        .filter(Boolean);
+      so.openBtnCount = openBtns.length;
+      so.allCardsHaveOpenBtn = cards.length > 0 && openBtns.length === cards.length;
+      so.openBtnLabel = openBtns.length ? openBtns[0].textContent.trim() : '';
+
+      // 取一条真实书源的卡片（最终小说网/笔趣阁之类），抓它的 url 文案
+      so.firstCardUrl = cards.length
+        ? ((cards[0].querySelector('.card-sub') || {}).textContent || '').trim().slice(0, 80)
+        : '';
+
+      if (openBtns.length) {
+        const tabsBefore = document.querySelectorAll('#bwStage webview').length;
+        openBtns[0].click();
+        // 等切换视图 + 初始化 + 建标签
+        await new Promise((s) => setTimeout(s, 3000));
+
+        const pane = document.querySelector('#view-browser');
+        so.paneActiveAfterOpen = !!(pane && pane.classList.contains('active'));
+        so.tabsAfterOpen = document.querySelectorAll('#bwStage webview').length;
+        so.tabAdded = so.tabsAfterOpen > tabsBefore;
+
+        // 当前地址栏应当落到书源网站上
+        const addr = (document.querySelector('#bwAddress') || {}).value || '';
+        so.addressAfterOpen = addr;
+        so.addressNonEmpty = !!addr && !/^about:/.test(addr);
+        // 地址栏 host 应当与该书源卡片的 url 是同一个域
+        try {
+          so.addressHost = new URL(addr).hostname.replace(/^www\./, '');
+        } catch (_) {
+          so.addressHost = '';
+        }
+
+        // 目标标签必须是「当前标签」（否则用户看不到加载的页面）
+        const activeView = Array.from(document.querySelectorAll('#bwStage webview'))
+          .find((w) => !w.hidden);
+        so.activeHasSrc = !!(activeView && activeView.getAttribute('src'));
+
+        // 重复点同一书源不应无限堆标签（同 host 复用）
+        const n1 = document.querySelectorAll('#bwStage webview').length;
+        openBtns[0].click();
+        await new Promise((s) => setTimeout(s, 800));
+        so.tabsAfterSecondOpen = document.querySelectorAll('#bwStage webview').length;
+        so.noTabLeak = so.tabsAfterSecondOpen <= n1;
+      }
+    } catch (e) {
+      r.func.so = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.so || {});
+    }
+
     r.errors = errors;
     r.title = document.title;
     r.brand = (document.querySelector('.brand') || {}).textContent || '';
@@ -711,6 +837,15 @@ app.whenReady().then(async () => {
       return;
     }
     res = await win.webContents.executeJavaScript(PROBE, true);
+    // webview guest 数只有主进程看得到；PROBE 只能数 DOM 里的 <webview>。
+    // 这里补上真实 guest 数，用来验证「反复切页签不泄漏 guest」。
+    try {
+      const g = webContents.getAllWebContents().filter((w) => w.getType() === 'webview').length;
+      if (res && res.func && res.func.bw) {
+        res.func.bw.guestsAfterSwitches = g;
+        res.func.bw.guestsBeforeSwitches = g; // 探针只切了一次，前后应相等
+      }
+    } catch (_) { /* ignore */ }
   } catch (e) {
     report({ ok: false, reason: 'execute-failed: ' + e.message, consoleErrors, seed: r_seed });
     app.exit(1);
@@ -870,6 +1005,36 @@ app.whenReady().then(async () => {
   checks.push(['阅读设置：改页宽生效', !!(f.rs && /^900px$/.test(f.rs.widthAfter || ''))]);
   checks.push(['阅读设置：恢复默认按钮存在且把字号还原', !!(f.rs && f.rs.resetBtnFound && /^17px$/.test(f.rs.sizeAfterReset || ''))]);
   checks.push(['阅读设置：关闭后对话框销毁', !!(f.rs && f.rs.modalClosed === true)]);
+
+  // ---- m09109 需求③：内置浏览器页 ----
+  // 回归点：<webview> 必须带 src 才会初始化 guest，否则 dom-ready 不触发、
+  // getWebContentsId() 抛异常、主进程永远 bind 不上（表现为「点站点无反应」）。
+  // 另：反复切到浏览器页签不得重复建 guest（loadBrowser 只能初始化一次）。
+  checks.push(['浏览器：页签存在', !!(f.bw && f.bw.tabFound === true)]);
+  checks.push(['浏览器：预置站点 >= 5 个', !!(f.bw && f.bw.siteCount >= 5)]);
+  checks.push(['浏览器：含起点中文网', !!(f.bw && f.bw.siteNames && f.bw.siteNames.some((n) => /起点/.test(n)))]);
+  checks.push(['浏览器：含飞卢小说网', !!(f.bw && f.bw.siteNames && f.bw.siteNames.some((n) => /飞卢/.test(n)))]);
+  checks.push(['浏览器：含刺猬猫', !!(f.bw && f.bw.siteNames && f.bw.siteNames.some((n) => /刺猬猫/.test(n)))]);
+  checks.push(['浏览器：含菠萝包', !!(f.bw && f.bw.siteNames && f.bw.siteNames.some((n) => /菠萝包|SF|sfacg/i.test(n)))]);
+  checks.push(['浏览器：含晋江文学城', !!(f.bw && f.bw.siteNames && f.bw.siteNames.some((n) => /晋江/.test(n)))]);
+  checks.push(['浏览器：合规提示声明不抓付费正文', !!(f.bw && /不抓取付费正文/.test(f.bw.notice || ''))]);
+  checks.push(['浏览器：地址栏存在', !!(f.bw && f.bw.addrFound === true)]);
+  checks.push(['浏览器：webview 元素已创建', !!(f.bw && f.bw.webviewCount >= 1)]);
+  checks.push(['浏览器：webview 带 src（否则 guest 不初始化）', !!(f.bw && f.bw.allHaveSrc === true)]);
+  checks.push(['浏览器：webview 已拿到 guest id（绑定成功）', !!(f.bw && f.bw.boundIds >= 1)]);
+  checks.push(['浏览器：反复切页签不重复建 guest', !!(f.bw && f.bw.guestsAfterSwitches === f.bw.guestsBeforeSwitches)]);
+  checks.push(['浏览器：真实加载出网页标题', !!(f.bw && f.bw.liveTitle)]);
+  checks.push(['浏览器：真实加载出网页正文', !!(f.bw && f.bw.liveTextLen > 500)]);
+
+  // 在线书源 → 内置浏览器打开该书的网站
+  checks.push(['书源网站：在线列表每条卡片都有「打开网站」按钮', !!(f.so && f.so.allCardsHaveOpenBtn === true)]);
+  checks.push(['书源网站：按钮文案为「打开网站」', !!(f.so && /打开网站/.test(f.so.openBtnLabel || ''))]);
+  checks.push(['书源网站：点击后切到浏览器页', !!(f.so && f.so.paneActiveAfterOpen === true)]);
+  checks.push(['书源网站：点击后新建了标签', !!(f.so && f.so.tabAdded === true)]);
+  checks.push(['书源网站：地址栏落到该书源网站', !!(f.so && f.so.addressNonEmpty === true)]);
+  checks.push(['书源网站：地址栏 host 与书源域名一致', !!(f.so && f.so.addressHost && f.so.firstCardUrl.includes(f.so.addressHost))]);
+  checks.push(['书源网站：当前标签已挂 src（guest 会初始化）', !!(f.so && f.so.activeHasSrc === true)]);
+  checks.push(['书源网站：重复点同一书源不重复堆标签', !!(f.so && f.so.noTabLeak === true)]);
 
   let fail = 0;
   const lines = ['=== GUI 冒烟检查 ==='];

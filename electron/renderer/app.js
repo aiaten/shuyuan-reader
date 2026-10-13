@@ -1425,8 +1425,10 @@ async function loadOnline() {
       </div>
       <div class="card-actions">
         <button class="btn primary" data-act="install">安装</button>
+        <button class="btn" data-act="open" title="在内置浏览器里打开这个书源对应的网站">🌐 打开网站</button>
         <button class="btn" data-act="view">查看 JSON</button>
       </div>`;
+    el.querySelector('[data-act=open]').onclick = () => openSourceSite(it.url, it.name);
     el.querySelector('[data-act=view]').onclick = async () => {
       const list = await run('下载 JSON…', () => window.api.onlineGet(it.id));
       if (!list) return;
@@ -1767,6 +1769,8 @@ let bwTabs = []; // [{id, url, title, loading, canGoBack, canGoForward}]
 let bwActive = null; // 当前标签 id
 let bwSeq = 0; // 标签 id 自增
 let bwInit = false; // 是否已初始化过（只装一次事件监听）
+let bwReadyPromise = null; // 首次初始化的 Promise（供 openSourceSite 等待）
+let bwLoading = null; // 正在进行的首次初始化
 
 /** 新标签 id */
 function bwNewId() {
@@ -1915,6 +1919,16 @@ function bwCreateTab(url) {
   view.setAttribute('data-tab', t.id);
   // 站点里的弹窗不另开窗口（主进程已 deny，这里再兜一层）
   view.setAttribute('allowpopups', 'false');
+
+  /**
+   * 关键：<webview> 必须有 src 才会初始化 guest 进程。
+   * 没有 src 时元素永远停在「未附加」状态——dom-ready 不触发、
+   * getWebContentsId() 抛异常、主进程 side 也就永远 bind 不上，
+   * 表现就是「点站点按钮没反应 / 标签页还没准备好」。
+   * 所以这里先给一个空白页启动 guest，真正的地址由 bind 成功后 navigate 过去。
+   */
+  view.setAttribute('src', t.url || 'about:blank');
+
   const stage = $('#bwStage');
   t.view = view;
 
@@ -1932,8 +1946,8 @@ function bwCreateTab(url) {
         if (r && r.bound && t.url) window.api.browser.navigate(t.id, t.url);
       });
     } catch (e) {
-      // guest 还没就绪，等下一次 dom-ready
-      console.warn('绑定 webview 失败（将等待 dom-ready）', e && e.message);
+      // guest 还没就绪：这是**预期内**的——刚 append 的 webview 往往要等
+      // dom-ready 才拿得到 id，下面的 dom-ready 监听会补上，不必刷警告。
     }
   };
   view.addEventListener('dom-ready', bindGuest);
@@ -2047,6 +2061,66 @@ function bwOpenSite(site) {
   const t = bwCreateTab(site.url);
   bwSelectTab(t.id);
 }
+
+/**
+ * 从「在线书源」列表跳到内置浏览器打开某个书源的网站。
+ *
+ * 地址用书源自身的 bookSourceUrl（往往就是站点根地址）。
+ * host 与预置站点重合时复用那个标签，避免同一站点开一堆标签。
+ */
+async function openSourceSite(url, name) {
+  const raw = String(url || '').trim();
+  if (!raw) {
+    toast('这个书源没有填写网站地址', 'err');
+    return;
+  }
+
+  // 切到浏览器页。loadBrowser 首次进入要 await 拉站点表/恢复会话，
+  // 必须等它完成——否则 bwSites 还是空的（host 匹配不上预置站点），
+  // 而且它会补一个空白标签，抢在我们前面成为当前标签。
+  switchView('browser');
+  await bwEnsureReady();
+
+  const host = hostOf(raw);
+  const existing = bwSites.find((s) => hostOf(s.home) === host);
+  if (existing) {
+    bwOpenSite(existing);
+    toast(`已在浏览器打开 ${existing.name}`, 'ok');
+    return;
+  }
+
+  // 已开着同一站点的标签就切过去，否则在新标签里打开
+  const opened = bwTabs.find((t) => t.url && hostOf(t.url) === host);
+  if (opened) {
+    bwSelectTab(opened.id);
+    bwGo(raw, opened.id);
+    return;
+  }
+
+  const t = bwCreateTab(raw);
+  bwSelectTab(t.id);
+  toast(`已在浏览器打开 ${name || host}`, 'ok');
+}
+
+/**
+ * 等浏览器页就绪（站点表已拉到、初始标签已建）。
+ * 把 loadBrowser 的首次初始化收成可等待的 Promise：多个调用共用同一个。
+ */
+function bwEnsureReady() {
+  if (bwInit) return Promise.resolve();
+  if (!bwReadyPromise) bwReadyPromise = loadBrowser().catch(() => {});
+  return bwReadyPromise;
+}
+
+/** 取主机名（小写，去掉 www.）；解析不了返回 '' */
+function hostOf(u) {
+  try {
+    return new URL(String(u)).hostname.toLowerCase().replace(/^www\./, '');
+  } catch (_) {
+    return '';
+  }
+}
+
 
 /* ---------- 历史记录（只存地址/标题） ---------- */
 
@@ -2166,6 +2240,27 @@ function bwInstallEvents() {
 /* ---------- 页签初始化 ---------- */
 
 async function loadBrowser() {
+  // 只在第一次进入时读站点表 / 恢复会话；之后切回来直接复用现有标签，
+  // 否则每点一次「浏览器」页签都会新建一批 <webview>（guest 进程泄漏）。
+  if (!bwInit) {
+    // 并发进入（例如从「在线书源」点打开网站，同时又点了页签）时只跑一次
+    if (bwLoading) return bwLoading;
+    bwLoading = (async () => {
+      try {
+        await bwFirstInit();
+      } finally {
+        bwLoading = null;
+      }
+    })();
+    return bwLoading;
+  }
+
+  // 再次进入：保持当前标签与地址栏内容即可
+  if (bwActive) bwSelectTab(bwActive);
+}
+
+/** 浏览器页的首次初始化：拉站点表、恢复会话、装事件 */
+async function bwFirstInit() {
   const info = await run('读取站点…', () => window.api.browser.listSites());
   if (info) {
     bwSites = info.sites || [];
