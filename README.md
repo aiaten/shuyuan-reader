@@ -192,6 +192,21 @@ URL 选项里的 `webView: true` / `js:` / `bodyJs:`（无内嵌浏览器可选�
 
 git 不在 PATH，全路径为 `C:\Program Files\Git\cmd\git.exe`。
 
+### 推送被阻断时的兜底：`tools/api-push.js`
+
+`github.com:443` 被阻断时 `git push` 会重试无效（而 `api.github.com` 一直可用）。
+`tools/api-push.js` 改走 REST API 推单个文件：上传 blob → 基于父树建新树 → 建提交 →
+移动 ref，只需 token 的 `repo` scope。
+
+```
+node tools/api-push.js <owner/repo> <ref> <父提交sha> <文件相对路径> <本地文件路径> "<commit message>"
+```
+
+它会打印 `new tree`。**若该 SHA 与 `git rev-parse HEAD^{tree}` 完全一致，则远端内容与
+本地逐字节相同**（树 SHA 是内容寻址的），可据此确认推送正确。推完用
+`git fetch origin <branch>` + `git reset --soft origin/<branch>` 对齐本地 ref
+（提交 SHA 会因时间戳不同而与本地原提交不同，但树相同）。
+
 ## 测试
 
 ```
