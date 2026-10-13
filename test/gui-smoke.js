@@ -52,7 +52,13 @@ const child = spawn(resolved.exe, [path.join(__dirname, 'gui-smoke-main.js')], {
   stdio: 'ignore',
 });
 
-const MAX_MS = 120000;
+/**
+ * 总预算。断言里有若干等真站（yck 书源列表、站点页加载）的步骤，响应 2.5~10s 不等，
+ * 慢的时候整体能到 90s+。120s 余量太小，会把「慢」误报成「没有结果文件」的失败，
+ * 所以放到 180s；真正的死锁仍会很快暴露（进程退出 / render-process-gone 都会提前收尾）。
+ * 想临时收紧：设 SHUYUAN_SMOKE_TIMEOUT_MS。
+ */
+const MAX_MS = Number(process.env.SHUYUAN_SMOKE_TIMEOUT_MS) || 180000;
 const t0 = Date.now();
 let done = false;
 

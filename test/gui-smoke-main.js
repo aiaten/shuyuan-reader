@@ -103,6 +103,10 @@ let r_seed = null;
 /** 断言脚本：在渲染进程里跑，返回结构化结果 */
 const PROBE = `(async () => {
   console.log('[PROBE] start');
+  // 各段落耗时：整体必须压在 MAX_MS（120s）以内，超时会让整个冒烟「没有结果文件」。
+  // 出问题时先看这里的分布，别靠猜。
+  const __t0 = Date.now();
+  const seg = (name) => { (r.seg = r.seg || {})[name] = Date.now() - __t0; };
   const errors = [];
   window.addEventListener('error', (e) => errors.push(String(e.message)));
   const r = { apiKeys: [], info: null, sources: null, online: null, views: [], caps: {}, func: {} };
@@ -571,12 +575,34 @@ const PROBE = `(async () => {
     // 并且给出目标地址的标签真的建起来（不是只切视图什么都不做）。
     try {
       const so = (r.func.so = {});
-      // 回到在线页
+      // 回到在线页。列表数据来自真站（yck），响应 2.5~10s 不等，固定 sleep 压不住，
+      // 必须轮询等它渲染完——否则 cardCount=0 会让这一组 8 项全挂（历史踩过）。
       document.querySelector('.tab[data-view="online"]').click();
-      await new Promise((s) => setTimeout(s, 1200));
 
-      const cards = Array.from(document.querySelectorAll('#onlineList .card'));
+      const cardsOf = () => Array.from(document.querySelectorAll('#onlineList .card'));
+      // 预算 20s：整段冒烟要压在 MAX_MS(120s) 内，这里的上限不能太宽松，
+      // 否则真站慢的时候会把整个进程拖到超时（连跑三次全超时的教训）。
+      const deadline = Date.now() + 20000;
+      let settled = 0;
+      let lastSig = '';
+      while (Date.now() < deadline) {
+        const cs = cardsOf();
+        // 连续两次「卡片数 > 0 且签名一致」才算稳定，避免渲染到一半就动手
+        const sig = cs.length + '|' + cs.map((c) => (c.querySelector('.card-title') || {}).textContent || '').join(',');
+        if (cs.length > 0 && sig === lastSig) {
+          settled++;
+          if (settled >= 2) break;
+        } else {
+          settled = 0;
+        }
+        lastSig = sig;
+        await new Promise((s) => setTimeout(s, 500));
+      }
+      so.listSettled = settled >= 2;
+
+      const cards = cardsOf();
       so.cardCount = cards.length;
+      so.listSettledCount = settled;
 
       const openBtns = cards
         .map((c) => c.querySelector('[data-act=open]'))
@@ -593,8 +619,16 @@ const PROBE = `(async () => {
       if (openBtns.length) {
         const tabsBefore = document.querySelectorAll('#bwStage webview').length;
         openBtns[0].click();
-        // 等切换视图 + 初始化 + 建标签
-        await new Promise((s) => setTimeout(s, 3000));
+        // 等切换视图 + 初始化（loadBrowser 首次要 await 拉站点表）+ 建标签
+        const readyDeadline = Date.now() + 12000;
+        let addr = '';
+        while (Date.now() < readyDeadline) {
+          const wvs = document.querySelectorAll('#bwStage webview').length;
+          addr = (document.querySelector('#bwAddress') || {}).value || '';
+          if (wvs > tabsBefore && addr && !/^about:/.test(addr)) break;
+          await new Promise((s) => setTimeout(s, 300));
+        }
+        await new Promise((s) => setTimeout(s, 600));
 
         const pane = document.querySelector('#view-browser');
         so.paneActiveAfterOpen = !!(pane && pane.classList.contains('active'));
@@ -602,7 +636,6 @@ const PROBE = `(async () => {
         so.tabAdded = so.tabsAfterOpen > tabsBefore;
 
         // 当前地址栏应当落到书源网站上
-        const addr = (document.querySelector('#bwAddress') || {}).value || '';
         so.addressAfterOpen = addr;
         so.addressNonEmpty = !!addr && !/^about:/.test(addr);
         // 地址栏 host 应当与该书源卡片的 url 是同一个域
@@ -620,15 +653,17 @@ const PROBE = `(async () => {
         // 重复点同一书源不应无限堆标签（同 host 复用）
         const n1 = document.querySelectorAll('#bwStage webview').length;
         openBtns[0].click();
-        await new Promise((s) => setTimeout(s, 800));
+        await new Promise((s) => setTimeout(s, 1200));
         so.tabsAfterSecondOpen = document.querySelectorAll('#bwStage webview').length;
         so.noTabLeak = so.tabsAfterSecondOpen <= n1;
       }
     } catch (e) {
       r.func.so = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.so || {});
     }
+    seg('afterSo');
 
     r.errors = errors;
+    seg('end');
     r.title = document.title;
     r.brand = (document.querySelector('.brand') || {}).textContent || '';
 
@@ -1027,6 +1062,7 @@ app.whenReady().then(async () => {
   checks.push(['浏览器：真实加载出网页正文', !!(f.bw && f.bw.liveTextLen > 500)]);
 
   // 在线书源 → 内置浏览器打开该书的网站
+  checks.push(['书源网站：在线列表已渲染完成（等待真站响应）', !!(f.so && f.so.listSettled === true)]);
   checks.push(['书源网站：在线列表每条卡片都有「打开网站」按钮', !!(f.so && f.so.allCardsHaveOpenBtn === true)]);
   checks.push(['书源网站：按钮文案为「打开网站」', !!(f.so && /打开网站/.test(f.so.openBtnLabel || ''))]);
   checks.push(['书源网站：点击后切到浏览器页', !!(f.so && f.so.paneActiveAfterOpen === true)]);
