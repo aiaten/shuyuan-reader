@@ -157,6 +157,7 @@ URL 选项里的 `webView: true` / `js:` / `bodyJs:`（无内嵌浏览器可选�
 | 阅读设置 | 阅读页 `Aa` 打开：**字体样式**（7 种预设：系统默认/宋体/黑体/楷体/微软雅黑/思源/等宽）、**字号 12–32px**、行距、页宽；实时预览 + 恢复默认；持久化到 `localStorage` |
 | 换源 | 书架卡片「换源」→ 并发搜索其他书源上的同一本书 → 按「书名+作者一致度」打分排序 → 一键切源（默认保留阅读进度、可顺带迁移已下载正文） |
 | 内置浏览器 | 书架后独立页签：预置起点中文网、飞卢小说网、刺猬猫、菠萝包、晋江文学城等**收费阅读网站**；支持地址栏、后退/前进/刷新、书签与历史持久化。**只做浏览，不抓取正文** |
+| 书源网站跳转 | 在线书源列表每条卡片有 `🌐 打开网站`：在内置浏览器里打开该书源自身的 `bookSourceUrl`；同域站点复用已有标签，不重复堆标签 |
 
 ## 已知环境约束
 
@@ -166,6 +167,30 @@ URL 选项里的 `webView: true` / `js:` / `bodyJs:`（无内嵌浏览器可选�
   `C:\Users\<用户>\.shuyuan-reader\`）再启动。目录联结（junction）无效。
 - Electron 是 GUI 子系统程序，**stdout/stderr 不可捕获**，脚本交互一律走结果文件。
 - 需清理 `ELECTRON_RUN_AS_NODE` 环境变量，否则 `require('electron')` 返回路径字符串。
+- **单实例锁按 `userData` 目录判定**：`electron/main.js` 有
+  `app.requestSingleInstanceLock()`。同目录再开一个实例会在 `whenReady` 之前
+  `app.quit()`（quit 异步，退出码仍是 0）。GUI 冒烟因此每次用独立的
+  `ELECTRON_USER_DATA_DIR`（带 pid），既避免自己撞自己，也让测试实例与用户
+  手动打开的软件可以并存。
+- **GUI 冒烟的时间预算**：断言里有等真站（yck 书源列表、站点页加载）的步骤，
+  正常耗时 103~114s。`MAX_MS` 取 180s（可用 `SHUYUAN_SMOKE_TIMEOUT_MS` 覆盖）；
+  取 120s 会把「慢」误报成「没有结果文件」。探针里的 `r.seg` 记录分段耗时。
+- **`github.com:443` 可能被间歇性阻断**（`api.github.com` / `codeload` 正常，
+  `github.com` 直连超时或拒绝）。本机已把 `gh` 配成 git 凭据助手，见下节。
+
+### 推送（本机实测可用的配置）
+
+`github.com:443` 会被间歇阻断，HTTPS 推送偶发 `Failed to connect to github.com:443`。
+`gh` 已登录（账号 aiaten，token 带 `repo` scope），在 `~/.gitconfig` 里配成凭据助手后
+推送走该凭据即可（注意 `gh.exe` 路径含空格，`helper` 值要用 `!'...'` 包起来）：
+
+```ini
+[credential "https://github.com"]
+	helper =
+	helper = "!'C:/Program Files/GitHub CLI/gh.exe' auth git-credential"
+```
+
+git 不在 PATH，全路径为 `C:\Program Files\Git\cmd\git.exe`。
 
 ## 测试
 
@@ -173,7 +198,7 @@ URL 选项里的 `webView: true` / `js:` / `bodyJs:`（无内嵌浏览器可选�
 node test/run.js unit     # 13 个纯离线单元测试（秒级）
 node test/run.js net      # 3 个联网测试（真实站点）
 node test/run.js e2e      # 2 个端到端（搜索→下载→导出）
-node test/run.js --all    # 全部 19 项（含 GUI 165 项断言）
+node test/run.js --all    # 全部 19 项（含 GUI 189 项断言）
 ```
 
 覆盖：Cookie 域语义、编码识别（GBK 假 utf-8 回退）、Legado 规则引擎（索引/切片/
