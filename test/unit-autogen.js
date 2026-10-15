@@ -233,6 +233,68 @@ t('deriveListItemRules：条目内多命中时末段加 .0', () => {
   assert.ok(/div\.author\.0@text/.test(rule.author), rule.author);
 });
 
+console.log('\n[3b] m12537 三站修复回归（selectorOf/sniffToc/JS模板/分组key）');
+
+t('chapterOrdinal / cn2num 解析', () => {
+  assert.strictEqual(A.chapterOrdinal('第123章 打开新世界的大门'), 123);
+  assert.strictEqual(A.chapterOrdinal('第一千二百三十四章 剑'), 1234);
+  assert.strictEqual(A.chapterOrdinal('第689章　挑选人手'), 689);
+  assert.strictEqual(A.chapterOrdinal('引子'), null);
+  assert.strictEqual(A.cn2num('二百五'), 250);
+});
+
+t('selectorOf 不产出假直接子（中间隔层的祖先退回后代组合）', () => {
+  const html = `<html><body><div id="biqunaicc"><div class="row row-detail"><div class="layout layout-col1"><a href="/x">1</a></div></div></div></body></html>`;
+  const $ = cheerio.load(html);
+  const el = $('div.layout-col1').get(0);
+  const sel = A.selectorOf($, el);
+  assert.ok($(sel).length >= 1, `选择器必须能命中自身：${sel}`);
+  assert.ok(!/#biqunaicc\s*>\s*div\.layout/.test(sel), `祖先非真父时不得用 > 直连：${sel}`);
+});
+
+t('jsFormTemplates 从内联脚本的 document.write 模板里找表单（redan/笔趣阁壳族）', () => {
+  const html = `<html><body><div id="sb"></div><script>function search(){ document.write('<form action="/user/search.html" method="get"><input type="text" name="q" /></form>'); }</script></body></html>`;
+  const $ = cheerio.load(html);
+  assert.strictEqual($('form').length, 0, '静态 DOM 里确实没有表单');
+  const out = A.jsFormTemplates($);
+  assert.ok(out.length >= 1, '应从模板串解析出表单');
+  assert.strictEqual(out[0].param, 'q');
+  assert.strictEqual(out[0].method, 'get');
+});
+
+t('sniffToc 主导目录分组：少量异目录链接不再砍死前缀（redan 判决）', () => {
+  const real = Array.from({ length: 20 }, (_, i) => `  <dd><a href="/novel/2607/${1680000 + i}.html">第${i + 1}章 标题${i}</a></dd>`).join('\n');
+  const nav = ['/', '/rank.html', '/top.html', '/author/x', '/category/y', '/', '/z/w', '/u/v', '/a/b', '/c/d']
+    .map((h) => `  <dd><a href="${h}">导航或推荐位文字不超长的</a></dd>`).join('\n');
+  const html = `<html><body><dl class="book">\n${real}\n${nav}\n</dl></body></html>`;
+  const $ = cheerio.load(html);
+  const r = A.sniffToc($, 'https://fake.test/novel/2607/');
+  assert.ok(r, '20 条同目录章链必须成组（旧 commonPrefix 版会误拒）');
+  assert.ok(r.inChapter >= 20, `主导目录内章链数应≥20，实为 ${r.inChapter}`);
+  assert.ok(/(^|\s)dd$/.test(r.itemSel) || r.itemSel.endsWith('dd'), `条目应落在 dd 层：${r.itemSel}`);
+});
+
+t('sniffToc 条目落在父签名层而不是容器层（bqg52 的 119 吞 li 判决）', () => {
+  const lis = Array.from({ length: 40 }, (_, i) => `<li><div class="f"><a href="/book/492339/${180315300 + i}.html">第${i + 1}章 标题</a></div></li>`).join('');
+  const html = `<html><body><div id="biqunaicc"><div class="row row-section"><ul class="section-list fix ycxsid">${lis}</ul></div></div></body></html>`;
+  const $ = cheerio.load(html);
+  const r = A.sniffToc($, 'https://fake.test/book/492339/');
+  assert.ok(r, '应识别出目录');
+  assert.ok(r.itemSel.endsWith('li'), `条目选择器必须到 li 层，实为 ${r.itemSel}`);
+  assert.ok(!/ul[^ ]*$/.test(r.itemSel), `不能停在 ul 容器层：${r.itemSel}`);
+});
+
+t('sniffBookList 无 class 条目分组 key 不带尾点（li. 非法 CSS 判决）', () => {
+  const items = Array.from({ length: 4 }, (_, i) => `<li><h3><a href="/b/${i + 1}.html">书名${i}</a></h3><div>作者：某某</div><p>简介文字要超过二十个字这样才能够被识别为简介内容。</p></li>`).join('');
+  const html = `<html><body><div class="content"><ul class="booklist">${items}</ul></div></body></html>`;
+  const $ = cheerio.load(html);
+  const cont = A.sniffBookList($, 'https://fake.test/s');
+  assert.ok(cont, '应找到列表容器');
+  assert.strictEqual(cont.itemSel, 'li', '无 class 的条目选择器不能是 "li."');
+  const rule = A.deriveListItemRules($, 'https://fake.test/s', cont);
+  assert.ok(!rule.bookList.endsWith('.'), `bookList 不能以点结尾：${rule.bookList}`);
+});
+
 /* ================= 4. generateSource 全链路（假站点） ================= */
 
 console.log('\n[4] generateSource 全链路（fetchText 注入，不联网）');
@@ -321,7 +383,83 @@ async function mainFlow() {
   });
 }
 
-mainFlow().then(() => {
+/* ================= 5. m12537 修复的全链路用例（目录分页/杂质/清洗/引擎重排） ================= */
+
+async function extraFlow() {
+  await at('假 bqg52 家族：目录分页+杂质跳过+非升序 sortByOrdinal+正文清洗全进规则', async () => {
+    const dd = (i) => `  <dd><a href="/book/1001/${3000 + i}.html">第${i}章 标题${i}</a></dd>`;
+    const junk = [
+      '  <dd><a href="/book/1001/9999.html">最新章节：第120章 新</a></dd>',
+      '  <dd><a href="/book/1001/9998.html">【在百度搜索某书】</a></dd>',
+      '  <dd><a href="/book/1001/9997.html">【某书TXT全集下载】</a></dd>',
+    ];
+    const DETAIL5 = `<!DOCTYPE html><html><head>
+<meta property="og:novel:book_name" content="某书">
+<meta property="og:novel:author" content="甲">
+<title>某书_目录</title></head><body>
+<dl id="toc">
+${Array.from({ length: 30 }, (_, i) => `  <dd><a href="/book/1001/${2000 + i}.html">第${i + 1}章 标题${i + 1}</a></dd>`).join('\n')}
+</dl>
+<a href="/book/1001/my1.html">更多章节...</a>
+</body></html>`;
+    const MY5 = `<!DOCTYPE html><html><head><title>某书目录</title></head><body>
+<div id="biqunaicc"><div class="row row-section">
+<dl class="toc2">
+${junk.join('\n')}
+${Array.from({ length: 115 }, (_, i) => dd(i + 1)).join('\n')}
+  <dd><a href="/book/1001/3999.html">第120章 大结局</a></dd>
+  <dd><a href="/book/1001/3998.html">第119章 转折</a></dd>
+</dl>
+<a href="/book/1001/my2.html">下一页</a>
+</div></div>
+</body></html>`;
+    const para = '夜色深沉，他坐在书桌前，想着前世的经历。';
+    const CONTENT5 = `<!DOCTYPE html><html><head><title>第1章</title></head><body>
+<div id="rtext">
+<p>好看的小说 > 介绍 > 某书 返回目录</p>
+<p>加入书签 推荐本书</p>
+<p>　　（第1页）</p>
+<p>${para.repeat(16)}</p>
+</div>
+</body></html>`;
+    const map = {
+      'https://fake.test/': HOME,
+      'POST https://fake.test/modules/article/search.php': LIST,
+      'https://fake.test/sort/1/1.html': LIST,
+      'https://fake.test/book/1001.html': DETAIL5,
+      'https://fake.test/book/1001/my1.html': MY5,
+    };
+    map['https://fake.test/book/1001/3001.html'] = CONTENT5;
+    const r = await A.generateSource('fake.test', { fetchText: makeFetcher(map) });
+    assert.strictEqual(r.ok, true, `应成功：${r.error || ''} steps=${JSON.stringify(r.steps)}`);
+    const s = r.source;
+    assert.strictEqual(s.ruleBookInfo.tocUrl, 'text.更多章节@href', `尾部假省略号必须剥掉：${s.ruleBookInfo.tocUrl}`);
+    assert.strictEqual(s.ruleToc.nextTocUrl, 'text.下一页@href');
+    assert.strictEqual(s.ruleToc.sortByOrdinal, true, '混序目录要启用引擎重排');
+    assert.ok(/:nth-of-type\(n\+4\)/.test(s.ruleToc.chapterList), `杂质块要被跳过：${s.ruleToc.chapterList}`);
+    assert.ok(/dd(:|\b)/.test(s.ruleToc.chapterList) && /(div#biqunaicc|dl\.toc2)/.test(s.ruleToc.chapterList), `chapterList 应落在 dd 条目层：${s.ruleToc.chapterList}`);
+    const rr = String(s.ruleContent.replaceRegex || '');
+    assert.ok(rr.includes('加入书签'), `书签词清洗缺失：${rr}`);
+    assert.ok(rr.includes('\\\\s>\\\\s') || rr.includes('\\s>\\s'), `面包屑 > 结构清洗缺失：${rr}`);
+    assert.ok(/第\\s\*\\d\+\\s\*页/.test(rr), `（第N页）清洗缺失：${rr}`);
+    assert.ok(r.steps.some((x) => x.name === '目录分页' && x.ok), '应有目录分页步骤');
+  });
+
+  await at('引擎 sortByOrdinal：混序目录按章号稳定重排（解析不了的跟随前值）', async () => {
+    const { SourceEngine } = require('../src/engine/source.js');
+    const names = ['第5章 戊', '第3章 丙', '第4章 丁', '第1章 甲', '番外 乙'];
+    const html = `<html><body><dl>${names.map((n, i) => `<dd><a href="/b/1/${i}.html">${n}</a></dd>`).join('')}</dl></body></html>`;
+    const eng = new SourceEngine({
+      bookSourceName: 'x', bookSourceUrl: 'https://fake.test',
+      ruleToc: { chapterList: 'dl dd', chapterName: 'a@text', chapterUrl: 'a@href', sortByOrdinal: true },
+    });
+    eng._fetch = async (url) => ({ status: 200, headers: { 'content-type': 'text/html;charset=utf-8' }, url, text: html });
+    const toc = await eng.toc('https://fake.test/b/1/');
+    assert.deepStrictEqual(toc.map((t) => t.name), ['第1章 甲', '番外 乙', '第3章 丙', '第4章 丁', '第5章 戊']);
+  });
+}
+
+mainFlow().then(extraFlow).then(() => {
   console.log(`\n通过 ${pass} · 失败 ${fail}`);
   process.exit(fail ? 1 : 0);
 });

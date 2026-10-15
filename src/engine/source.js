@@ -38,6 +38,22 @@ const MAX_ROUNDS = 64;
  * 由 `rule.js::pageHtmlOf($)` 优先取用（真实用例：7908 神文 `ruleContent.content`、
  * 7908 `ruleBookInfo.coverUrl`、7940 uu书库 `ruleSearch.bookList`）。
  */
+/** 中文数字 → 整数（与 autogen::cn2num 同逻辑；引擎不反向依赖生成器，就地小抄一份） */
+function cnToNum(s) {
+  const D = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const U = { 十: 10, 百: 100, 千: 1000 };
+  let n = 0;
+  let cur = 0;
+  let lastU = 0;
+  for (const ch of String(s)) {
+    if (D[ch] != null) cur = D[ch];
+    else if (U[ch] != null) { n += (cur || 1) * U[ch]; cur = 0; lastU = U[ch]; }
+    else return null;
+  }
+  if (cur && lastU >= 100) cur *= lastU / 10; // 二百五→250、一千二→1200
+  return n + cur;
+}
+
 function loadDoc(html) {
   const $ = cheerio.load(html);
   if (html) $.__srcHtml = String(html);
@@ -685,6 +701,34 @@ class SourceEngine {
         seenUrl.add(c.url);
         c.index = out.length;
         out.push(c);
+      }
+
+      // sortByOrdinal：「网页转书源」生成的书源扩展字段。
+      // 站点目录页常把「最新章节」降序捷径块和开头章节混进同一列表（如 bqg52 的
+      // my1 = 689..682 + 101..200 + 1..6），去重后按章节序号稳定重排一次。
+      // 解析不出序号的（序/引子等）排最前由前缀判定，其余保持原相对次序沉底。
+      if (rc.sortByOrdinal === true || rc.sortByOrdinal === 'true') {
+        const ordKey = (name) => {
+          const t = String(name || '').trim();
+          const m = t.match(/^第\s*([0-9]{1,7}|[零〇一二三四五六七八九十百千两]{1,8})\s*[章节回卷话集篇]/);
+          if (m) {
+            if (/^[0-9]+$/.test(m[1])) return parseInt(m[1], 10);
+            return cnToNum(m[1]);
+          }
+          if (/^(序[章言]?|楔子|引子|前言)/.test(t)) return -1;
+          return null;
+        };
+        const dec = [];
+        for (let i = 0; i < out.length; i++) dec.push({ c: out[i], k: ordKey(out[i].name), i });
+        // 无序号的项：先按原顺序放开头段之后？——简单稳妥：null 视作原位置的“未知”，
+        // 用「前面最近一个有序号的值」跟随排序（如「引子」后没数字就留在最前）。
+        let lastKnown = -1;
+        for (const d of dec) {
+          if (d.k == null) { d.k = lastKnown + 0.5; } else { lastKnown = d.k; }
+        }
+        dec.sort((a, b) => (a.k - b.k) || (a.i - b.i));
+        out.length = 0;
+        for (const d of dec) { d.c.index = out.length; out.push(d.c); }
       }
       return out;
     }, {});
