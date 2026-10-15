@@ -133,7 +133,14 @@ function selectorOf($, el) {
     if (anc) {
       const cls = bizClasses($, el);
       const self = cls.length ? `${el.name}.${cls.slice(0, 2).join('.')}` : el.name;
-      return `${anc} > ${self}`;
+      /* ⚠ anc 不一定是 el 的亲父（中间可能隔着无身份祖先）。
+         直接拼 `anc > self` 会生成匹配 0 个的假直接子选择器——实测 m.bqg52.com 的
+         `div.biqunaicc > div.layout.layout-col1`（真父是 div.row.row-detail）让整本书
+         目录解析不出章节地址。必须先在全文档验证命中数。 */
+      const direct = `${anc} > ${self}`;
+      try { if ($(direct).length === 1) return direct; } catch (_) { /* 非法选择器跳过 */ }
+      const desc = `${anc} ${self}`;
+      try { if ($(desc).length === 1) return desc; } catch (_) { /* 同上 */ }
     }
     node = node.parent;
     depth++;
@@ -159,6 +166,29 @@ function digitRatio(s) {
   if (!t.length) return 0;
   const d = (t.match(/\d/g) || []).length;
   return d / t.length;
+}
+
+/** 中文数字 → 整数（一~九千九百九十九；解析不了返回 null）。口语省略「二百五」=250 */
+function cn2num(s) {
+  const D = { 零: 0, 〇: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9 };
+  const U = { 十: 10, 百: 100, 千: 1000 };
+  let n = 0;
+  let cur = 0;
+  let lastU = 0;
+  for (const ch of String(s)) {
+    if (D[ch] != null) cur = D[ch];
+    else if (U[ch] != null) { n += (cur || 1) * U[ch]; cur = 0; lastU = U[ch]; }
+    else return null;
+  }
+  if (cur && lastU >= 100) cur *= lastU / 10; // 二百五→250、一千二→1200；二十五 不放大
+  return n + cur;
+}
+
+/** 从「第N章/节/回…」解析阿拉伯数字序号；解析不了返回 null */
+function chapterOrdinal(name) {
+  const m = String(name || '').trim().match(/^第\s*([0-9]+|[零〇一二三四五六七八九十百千两]{1,8})\s*(?:[章节回卷话集篇])/);
+  if (!m) return null;
+  return /^[0-9]+$/.test(m[1]) ? parseInt(m[1], 10) : cn2num(m[1]);
 }
 
 /** 是否像章节名（第N章/节/回、序章、番外、正文） */
@@ -235,10 +265,52 @@ function templateSearchUrl(at, param) {
  * ------------------------------------------------------------------ */
 
 /**
+ * 从「静态 HTML 里的 <form> 串」造搜索入口描述。
+ * 站点常把搜索框写进 JS 模板字符串（document.writeln('<form …>')），
+ * 静态 DOM 里根本没有 <form>——实测 redan.cc / bqg711.cc 的 /js/common.js
+ * 就是这么注入搜索框的。这里把这类模板串临时插进一个 DOM 里按真表单解析。
+ * @returns {Array} findSearchForm 同款描述数组（可能为空）
+ */
+function jsFormTemplates($) {
+  const out = [];
+  const seen = new Set();
+  const push = (html) => {
+    if (!html || !/<form/i.test(html) || seen.has(html)) return;
+    seen.add(html);
+    try {
+      const fake = cheerio.load(`<body>${html}</body>`);
+      const f = findSearchForm(fake, 'https://fake.local/');
+      if (f) out.push(f);
+    } catch (_) { /* 模板残缺就跳过 */ }
+  };
+  // 内联脚本里的字符串常量。按引号类型分三种正则——单引号串里可以合法出现双引号
+  // （redan/common.js 就是 `'<form action="/user/search.html">'` 这种形态），
+  // 用统一字符类会在第一个内层引号处截断，模板永远解析不出来。
+  const texts = [];
+  for (const s of $('script:not([src])').toArray()) texts.push($(s).html() || '');
+  const inline = texts.join('\n');
+  const fragOf = (m) => m[1];
+  const strRes = [
+    /'((?:[^'\\]|\\.){0,1500}?)'/g,
+    /"((?:[^"\\]|\\.){0,1500}?)"/g,
+    /`((?:[^`\\]|\\.){0,1500}?)`/g,
+  ];
+  for (const re of strRes) {
+    let m;
+    while ((m = re.exec(inline))) {
+      const frag = fragOf(m);
+      if (!/<form/i.test(frag)) continue;
+      push(frag.replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16))).replace(/\\(['"`\\])/g, '$1'));
+    }
+  }
+  return out;
+}
+
+/**
  * 从首页 HTML 里找搜索表单。
  * @returns {{action:string, method:string, param:string, kind:'form'|'link'}|null}
  */
-function findSearchForm($, baseUrl) {
+function findSearchForm($, baseUrl, opts = {}) {
   const forms = $('form').toArray();
   for (const f of forms) {
     const $f = $(f);
@@ -316,7 +388,9 @@ function sniffBookList($, baseUrl) {
     const groups = new Map();
     for (const c of children) {
       const $c = $(c);
-      const key = `${c.name}.${String($c.attr('class') || '').trim().split(/\s+/).filter(Boolean).sort().join('.')}`;
+      const clsStr = String($c.attr('class') || '').trim().split(/\s+/).filter(Boolean).sort().join('.');
+      // 无 class 时不能拼出 "li." 这种尾点 key——它会流进 itemSel 变成非法 CSS 选择器
+      const key = clsStr ? `${c.name}.${clsStr}` : c.name;
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(c);
     }
@@ -425,7 +499,8 @@ function itemSelectorSeg(el, fallbackKey) {
   const stable = cls.filter((c) => !/^(clear|clearfix|hidden|visible|active|on|off|row|col|container|wrap|wrapper|fl|fr|left|right|text-center|pull-left|pull-right|mt\d*|mb\d*|pt\d*|pb\d*|p\d+|m\d+|first|last|odd|even)$/i.test(c));
   const tag = (el && el.name) || 'div';
   if (stable.length) return `${tag}.${stable.slice(0, 2).join('.')}`;
-  if (fallbackKey) return fallbackKey;
+  // 兜底 key 去尾点（"li." → "li"），否则产出非法 CSS
+  if (fallbackKey) return String(fallbackKey).replace(/\.$/, '');
   return tag;
 }
 
@@ -682,20 +757,53 @@ function sniffToc($, baseUrl, bookUrl) {
     let sameOrigin = 0;
     let chapterName = 0;
     const hrefs = [];
-    for (const a of links.slice(0, 80)) {
+    const pairs = []; // {a, h}：hrefs 是过滤后的数组，后面按主导目录复算时必须对得上原元素
+    for (const a of links) {
       const h = abs(baseUrl, $(a).attr('href'));
       if (!h || originOf(h) !== origin) continue;
       sameOrigin++;
       hrefs.push(h);
+      pairs.push({ a, h });
       if (looksLikeChapterName(($(a).text() || '').trim())) chapterName++;
     }
     if (sameOrigin < 8) continue;
-    const ratio = chapterName / Math.max(1, Math.min(links.length, 80));
+    let ratio = chapterName / Math.max(1, hrefs.length);
     // 章名比例高 → 目录；链接数极多（>40）也基本可以确定是目录
     if (ratio < 0.35 && links.length < 40) continue;
-    // 链接应集中在一个共同前缀下（同一本书）
-    const prefix = commonPrefix(hrefs);
+    // 链接应集中在一本书的目录下。
+    // 旧实现用「全部链接的字符串公共前缀」：redan.cc 详情页 DL.book 有 78/1177
+    // 个章链（ratio 0.97），但少量导航/站内其它链接把公共前缀砍到站点根
+    // `https://www.redan.cc/`（长度不够 origin+3）→ 整本书目录被判非目录 →
+    // 「详情页里找不到章节列表」。改成「多数目录分组」：取出现最多的父目录，
+    // 用它算前缀和章名命中率；没有主导目录时退回公共前缀算法。
+    const dirCount = new Map();
+    for (const h of hrefs) {
+      const i = h.lastIndexOf('/');
+      const d = i > 0 ? h.slice(0, i + 1) : h;
+      dirCount.set(d, (dirCount.get(d) || 0) + 1);
+    }
+    let prefix = '';
+    let dirN = 0;
+    for (const [d, n] of dirCount) if (n > dirN) { prefix = d; dirN = n; }
+    if (dirN < 8) prefix = commonPrefix(hrefs);
     if (prefix.length < origin.length + 3) continue;
+    // 章名命中率按主导目录内计（防止目录块混入全站导航稀释判据）
+    let chapterCountDom = Math.round(hrefs.length * ratio);
+    if (dirN >= 8) {
+      let inDir = 0;
+      let inDirChapter = 0;
+      for (const p of pairs) {
+        if (!p.h.startsWith(prefix)) continue;
+        inDir++;
+        if (looksLikeChapterName(($(p.a).text() || '').trim())) inDirChapter++;
+      }
+      if (inDir >= 8) {
+        const r2 = inDirChapter / inDir;
+        if (r2 < 0.35 && inDir < 40) continue;
+        ratio = r2;
+        chapterCountDom = inDirChapter;
+      }
+    }
 
     // 找「容器内重复出现的直接子元素」作为条目的选择器
     const itemInfo = pickTocItem($, el, baseUrl, origin);
@@ -708,6 +816,7 @@ function sniffToc($, baseUrl, bookUrl) {
         containerSel: selectorOf($, el),
         itemSel: itemInfo.itemSel,
         count: links.length,
+        inChapter: chapterCountDom,
         chapterRatio: ratio,
         prefix,
       };
@@ -729,21 +838,56 @@ function pickTocItem($, container, baseUrl, origin) {
     if (inner.length >= 5) {
       const key = `${inner[0].name}`;
       const same = inner.filter((x) => x.name === key).length;
-      if (same >= 5) cands.push({ prefix: '', itemSel: `${key}`, count: same });
+      if (same >= 5) cands.push({ prefix: '', itemSel: `${key}`, count: same, leaf: true });
     } else if ($k.find('a[href]').length >= 5) {
-      cands.push({ prefix: '', itemSel: selectorSeg($, k), count: $k.find('a[href]').length });
+      cands.push({ prefix: '', itemSel: selectorSeg($, k), count: $k.find('a[href]').length, leaf: false });
     }
   }
-  // 2) 容器自身是一堆同标签兄弟
+  // 2) 锚点「直接父」的签名众数：条目通常是 <li><a>/<dd><a>。
+  //    上面 1b 可能把容器层当条目（m.bqg52.com：div.layout.layout-col1 里 119 个 a
+  //    被当成 1 个「条目」，引擎 a@text 把整块章节名拼成一条）。
+  //    这里按「不同父元素个数」计票：父元素本身重复 >=5 个才算条目候选，且优先采纳。
+  //    另算一份「上溯到容器直接子元素」的签名（ul>li>div.f>a 的条目语义单元是 li）：
+  //    上溯结果 >=5 个才算并优先用；单壳链（div.row 只 1 个）退回直接父签名。
+  const sig0 = new Map();
+  const sigC = new Map();
+  const bump = (map, p, a) => {
+    const cls = String($(p).attr('class') || '').trim().split(/\s+/).filter(Boolean).sort().join('.');
+    const key = cls ? `${p.name}.${cls}` : p.name;
+    if (!map.has(key)) map.set(key, new Set());
+    map.get(key).add(p);
+  };
+  for (const a of $c.find('a[href]').toArray()) {
+    const h = abs(baseUrl, $(a).attr('href'));
+    if (!h || originOf(h) !== origin) continue;
+    const p = $(a).parent()[0];
+    if (!p || p === container || p.name === 'body' || p.name === 'html' || p.name === 'a') continue;
+    bump(sig0, p);
+    let q = p;
+    while (q && q !== container && $(q).parent().length && $(q).parent()[0] !== container) q = $(q).parent()[0];
+    if (q && q !== container && q !== p && $(q).parent()[0] === container) bump(sigC, q);
+  }
+  const pickSig = (map) => {
+    let bk = null;
+    let bs = 0;
+    for (const [key, set] of map) if (set.size > bs) { bs = set.size; bk = key; }
+    return bs >= 5 ? { prefix: '', itemSel: bk, count: bs, leaf: true } : null;
+  };
+  const climbed = pickSig(sigC);
+  const direct = pickSig(sig0);
+  if (climbed) cands.push(climbed);
+  else if (direct) cands.push(direct);
+  // 3) 容器自身是一堆同标签兄弟
   if (!cands.length) {
     const tagCount = {};
     for (const k of kids) tagCount[k.name] = (tagCount[k.name] || 0) + 1;
     for (const [tag, n] of Object.entries(tagCount)) {
-      if (n >= 5 && $(`${tag} a[href]`, $c).length >= 5) cands.push({ prefix: '', itemSel: tag, count: n });
+      if (n >= 5 && $(`${tag} a[href]`, $c).length >= 5) cands.push({ prefix: '', itemSel: tag, count: n, leaf: true });
     }
   }
   if (!cands.length) return null;
-  cands.sort((a, b) => b.count - a.count);
+  // leaf（真条目层）优先，其次数量
+  cands.sort((a, b) => (b.leaf ? 1 : 0) - (a.leaf ? 1 : 0) || b.count - a.count);
   const pick = cands[0];
   const containerSel = selectorOf($, container);
   const full = pick.prefix ? `${containerSel} ${pick.itemSel}` : `${containerSel} ${pick.itemSel}`;
@@ -789,8 +933,12 @@ function sniffContent($, baseUrl) {
     // 跳过整页容器
     const text = ($el.text() || '').replace(/\s+/g, ' ').trim();
     if (text.length < 150) continue;
-    // 容器里如果再嵌一个同样大的块，说明这个太外层
-    const childBig = $el.children().toArray().some((c) => ($(c).text() || '').replace(/\s+/g, ' ').trim().length > text.length * 0.8);
+    // 容器里如果再嵌一个同样大的「块容器」，说明这个太外层。
+    // 只认块级容器子元素——正文整体塞进单个 <p>/<font> 的站点很常见（实测 bqg52 家族），
+    // 那种情况 <p> 占父文本 >80% 是正常的，不能把正文块本身拒掉。
+    const childBig = $el.children().toArray().some((c) =>
+      (c.name === 'div' || c.name === 'article' || c.name === 'section' || c.name === 'td')
+      && ($c => ($c.text() || '').replace(/\s+/g, ' ').trim().length > text.length * 0.8)($(c)));
     if (childBig) continue;
 
     const linkText = $el.find('a').toArray().reduce((n, a) => n + ($(a).text() || '').length, 0);
@@ -886,7 +1034,13 @@ async function generateSource(siteUrl, opts = {}) {
   step('首页可达', true, `HTTP ${home.status}，${home.text.length} 字节，标题「${homeTitle.slice(0, 30)}」`);
 
   /* --- 2. 搜索表单 --- */
-  const form = findSearchForm($home, base);
+  // 静态表单优先；没有就从内联脚本的 document.write 模板串里找（redan 壳族）。
+  let form = findSearchForm($home, base);
+  let formFromJs = false;
+  if (!form) {
+    const jsForms = jsFormTemplates($home);
+    if (jsForms.length) { form = jsForms[0]; formFromJs = true; }
+  }
   let searchUrl = '';
   let searchMethod = 'GET';
   let searchBodyParam = '';
@@ -898,7 +1052,7 @@ async function generateSource(siteUrl, opts = {}) {
   let ogForced = false;
 
   if (form) {
-    step('发现搜索表单', true, `${form.method.toUpperCase()} ${form.action}${form.method === 'post' ? ' 参数 ' + form.param : '?' + form.param + '=…'}`);
+    step('发现搜索表单', true, `${formFromJs ? 'JS 注入模板 ' : ''}${form.method.toUpperCase()} ${form.action}${form.method === 'post' ? ' 参数 ' + form.param : '?' + form.param + '=…'}`);
     const hiddenPairs = Object.entries(form.hidden || {});
     /** 按表单形态生成一次请求描述（隐藏字段必须带上，空值也带——服务器可能用它判表单合法性） */
     const mkAttempt = (kw, method) => {
@@ -1071,34 +1225,175 @@ async function generateSource(siteUrl, opts = {}) {
   step('解析详情页', true, `书名 ${bookInfo.name || '—'}${bookInfo.author ? ' / 作者 ' + bookInfo.author : ''}`);
 
   /* --- 5. 目录 --- */
-  const toc = sniffToc($detail, detailUrl, detailUrl);
+  let toc = sniffToc($detail, detailUrl, detailUrl);
   if (!toc) {
     step('识别目录', false, '详情页里找不到章节列表');
     return { ok: false, steps, notes, error: '无法识别目录结构（详情页里没有成规模的章节链接）' };
   }
-  const tocRule = {
+  let tocRule = {
     chapterList: toc.itemSel,
     chapterName: 'a@text',
     chapterUrl: 'a@href',
   };
   step('识别目录', true, `${toc.itemSel}，${toc.count} 章（章名匹配率 ${(toc.chapterRatio * 100).toFixed(0)}%）`);
 
+  /* --- 5.5 目录分页 --- */
+  // 详情页目录常只列前 100 章（m.bqg52.com 全站 689 章只露 112）：
+  // 找「查看更多章节/下一页」类子页链接 → 到子页重嗅目录 →
+  // ruleBookInfo.tocUrl 用 text.…@href 规则（引擎在详情页上求值出子页地址），
+  // ruleToc.nextTocUrl='text.下一页@href' 让引擎串行翻到最后一页（url 去重合并）。
+  let tocCtx = { $: $detail, url: detailUrl };
+  {
+    const originD = originOf(detailUrl);
+    const detailDir = detailUrl.replace(/[^/?#]*(\?|#)?$/, '');
+    const subCands = [];
+    for (const a of $detail('a[href]').toArray()) {
+      const t = ($detail(a).text() || '').trim();
+      if (!t || t.length > 24) continue;
+      if (!/下一页|下页|更多章节|完整目录|全部章节|查看全部|更多目录/.test(t)) continue;
+      const h = abs(detailUrl, $detail(a).attr('href'));
+      if (!h || originOf(h) !== originD || h === detailUrl) continue;
+      if (!h.startsWith(detailDir)) continue; // 必须是本书目录下的子页
+      subCands.push({ t, h });
+    }
+    for (const cand of subCands.slice(0, 3)) {
+      let subRes;
+      let $sub;
+      let toc2;
+      try {
+        subRes = await fetchPage(cand.h, { jar, headers: { Referer: detailUrl } });
+        $sub = cheerio.load(subRes.text);
+        toc2 = sniffToc($sub, subRes.url || cand.h, subRes.url || cand.h);
+        if (!toc2) continue;
+        // 比较的是「主导目录内的章链数」而不是原始链接数（211 vs 119 那种假高）
+        if ((toc2.inChapter || toc2.count) < (toc.inChapter || toc.count) * 0.95) continue;
+        // 子页必须还能「下一页」续下去，否则只是同一页换个入口，不值得换起点
+        const hasNext = $sub('a[href]').toArray().some((a) => {
+          const t2 = ($sub(a).text() || '').trim();
+          if (!/下一页|下页/.test(t2)) return false;
+          const h2 = abs(subRes.url || cand.h, $sub(a).attr('href'));
+          return h2 && originOf(h2) === originD && h2 !== (subRes.url || cand.h);
+        });
+        if (!hasNext) continue;
+        tocRule = {
+          chapterList: toc2.itemSel,
+          chapterName: 'a@text',
+          chapterUrl: 'a@href',
+          nextTocUrl: 'text.下一页@href',
+        };
+        // DOM 文本的尾部省略号常是 CSS ::after 画的（bqg52「查看更多章节」实测无实点），
+        // text. 规则 includes 匹配会被假点崩掉 → 构建规则前剥掉尾标点
+        const tip = cand.t.replace(/[@|#|&&]/g, '').replace(/[….。．·、\s.]+$/g, '').slice(0, 16);
+        if (!tip) continue;
+        bookInfo.tocUrl = `text.${tip}@href`;
+        toc = toc2;
+        tocCtx = { $: $sub, url: subRes.url || cand.h };
+        step('目录分页', true, `子页 ${shortUrl(cand.h)} ${toc2.count} 章；tocUrl=${bookInfo.tocUrl}，nextTocUrl=text.下一页@href`);
+        break;
+      } catch (e) {
+        step('目录分页', false, e.message);
+        break;
+      }
+    }
+  }
+
+  /** 目录头部导航杂质（真目录之前常混入这些项） */
+const JUNK_TOC_RE = /^(最新章节\s*[：:]|【[^】]*】|第?\s*\d+\s*页|上一页|下一页?(页)?|(返回|全书|全部)目录|开始阅读|.*TXT.{0,6}下载|(百度|搜狗|谷歌)搜索)/i;
+
+/* --- 5.9 目录头部杂质：笔趣阁族常在真目录前塞「最新章节：…」捷径、「【在百度搜索…】」、
+     「【…TXT下载】」等条目。从头数连续杂质项，用 :nth-of-type 跳过（引擎/cheerio 都支持）。 --- */
+  if (toc && tocRule && toc.itemSel) {
+    const $tl = tocCtx.$ || $detail;
+    const all = $tl(toc.itemSel).toArray();
+    let k = 0;
+    while (k < 8 && k < all.length && JUNK_TOC_RE.test(($tl(all[k]).text() || '').trim())) k++;
+    if (k > 0 && all.length - k >= 10) {
+      toc.itemSel = `${toc.itemSel}:nth-of-type(n+${k + 1})`;
+      tocRule.chapterList = toc.itemSel;
+      step('识别目录', true, `目录前 ${k} 项为导航杂质已跳过（${toc.itemSel}）；有效 ${all.length - k} 章`);
+    }
+  }
+
+  /* --- 5.9b 「最新章节」捷径块检测：目录列表里「第N章」序号一旦出现非升序（头部混 689..682 降序块、
+     尾部混 1..6 快捷块——bqg52 的 my1 就是三段混在一个 ul 里），CSS 表达不了「跳头留尾」，
+     改打引擎扩展字段 sortByOrdinal：引擎去重后按章节序号稳定重排。 --- */
+  if (toc && tocRule && toc.itemSel) {
+    const $tt = tocCtx.$ || $detail;
+    const items = $tt(toc.itemSel).toArray();
+    if (items.length >= 30) {
+      const ord = [];
+      for (const el of items) {
+        const n = chapterOrdinal(($tt(el).text() || '').trim());
+        if (n != null) ord.push(n);
+      }
+      if (ord.length >= items.length * 0.6) {
+        let outOfOrder = false;
+        for (let i = 1; i < ord.length; i++) if (ord[i] < ord[i - 1]) { outOfOrder = true; break; }
+        if (outOfOrder) {
+          tocRule.sortByOrdinal = true;
+          step('识别目录', true, '目录混有「最新章节」捷径块（序号非升序），已启用按章节序号排序');
+        }
+      }
+    }
+  }
+
   /* --- 6. 正文 --- */
   let contentRule = { content: '', nextContentUrl: '' };
-  const firstChapter = resolveChapterUrl($detail, toc, detailUrl);
+  const firstChapter = resolveChapterUrl(tocCtx.$, toc, tocCtx.url);
   if (firstChapter) {
-    try {
-      const chRes = await fetchPage(firstChapter, { jar, headers: { Referer: detailUrl } });
-      const $ch = cheerio.load(chRes.text);
-      const c = sniffContent($ch, chRes.url || firstChapter);
-      if (c) {
-        contentRule = { content: c.content, nextContentUrl: c.nextContentUrl };
-        step('识别正文', true, `${c.sel}，约 ${c.length} 字${c.nextContentUrl ? '（有分页）' : ''}`);
-      } else {
-        step('识别正文', false, '正文页里找不到正文块');
+    // 有的站对爬虫吐「空章」（正文只剩提示语）——多试几章，取字数最多的一章做嗅探样本
+    const $t3 = tocCtx.$ || $detail;
+    const nToc = $t3(toc.itemSel).length || 10;
+    const candIdxs = [0, 1, 2, Math.min(nToc - 1, Math.max(3, Math.floor(nToc / 50)))];
+    let best = null;
+    for (const ci of new Set(candIdxs)) {
+      let cu = ci === 0 ? firstChapter : null;
+      if (!cu) {
+        const el = $t3(toc.itemSel).toArray()[ci];
+        if (el) {
+          const $it = $t3(el);
+          const $a = $it.find('a[href]').first().length ? $it.find('a[href]').first() : $it.filter('a[href]').first();
+          cu = $a.length ? abs(tocCtx.url, $a.attr('href')) : '';
+        }
       }
-    } catch (e) {
-      step('识别正文', false, e.message);
+      if (!cu) continue;
+      try {
+        const chRes = await fetchPage(cu, { jar, headers: { Referer: tocCtx.url } });
+        const $ch = cheerio.load(chRes.text);
+        const c = sniffContent($ch, chRes.url || cu);
+        if (!c) continue;
+        const plainLen = String($ch(c.sel).text() || '').replace(/\s+/g, '').length;
+        if (!best || plainLen > best.plainLen) best = { c, chRes, $ch, plainLen };
+        if (best.plainLen >= 400) break; // 够长就当它是真正文，不再多试
+      } catch (_) { /* 换下一张 */ }
+    }
+    if (best) {
+      const c = best.c;
+      const $ch = best.$ch;
+      contentRule = { content: c.content, nextContentUrl: c.nextContentUrl };
+      step('识别正文', true, `${c.sel}，约 ${best.plainLen} 字${c.nextContentUrl ? '（有分页）' : ''}`);
+      // 正文里混入的导航噪声：「上一章…下一章」导航、「（第N页）」水印尾巴、书签/推荐行、面包屑
+      // （引擎按 Legado 语义对整章正文全局应用 ruleContent.replaceRegex 替换为空串）
+      try {
+        const plain = String($ch(c.sel).text() || '');
+        const pats = [];
+        if (/上一章[\s\S]{0,24}下一章/.test(plain)) pats.push('\\s*上一章[\\s\\S]{0,24}?下一章');
+        if (/（第\s*\d+\s*页）|\(\s*第\s*\d+\s*页\s*\)/.test(plain)) pats.push('（第\\s*\\d+\\s*页）|\\(\\s*第\\s*\\d+\\s*页\\s*\\)');
+        if (/加入书签|推荐本书|打开书架|添加书签|阅读记录|报告错误|相邻推荐|返回目录|返回书页/.test(plain)) {
+          pats.push('[^\\n]*(?:加入书签|推荐本书|打开书架|添加书签|阅读记录|报告错误|相邻推荐|返回目录|返回书页)[^\\n]*');
+        }
+        if (/浏览器阅读模式/.test(plain)) pats.push('[^\\n]*浏览器阅读模式[^\\n]*');
+        // 面包屑噪声（「好看的小说 > 介绍 > 书名 …」尾巴措辞每页随机换，按 > 结构整行剥；
+        // 正文行里出现「汉字 > 汉字」的极罕见，Legado 站源同款做法）
+        if (/[\u4e00-\u9fa5A-Za-z0-9]{2,12}\s*>\s*[\u4e00-\u9fa5]/.test(plain)) pats.push('[^\\n]*\\s>\\s[^\\n]*');
+        if (pats.length) {
+          contentRule.replaceRegex = pats.join('|');
+          notes.push('正文含导航噪声，已生成 replaceRegex 清洗规则');
+          step('识别正文', true, `${c.sel}，约 ${best.plainLen} 字${c.nextContentUrl ? '（有分页）' : ''}；已加正文清洗规则`);
+        }
+      } catch (_) { /* 清洗探测非致命 */ }
+    } else {
+      step('识别正文', false, '正文页里找不到正文块');
     }
   } else {
     step('识别正文', false, '目录里解析不出章节地址');
@@ -1256,4 +1551,9 @@ module.exports = {
   templateSearchUrl,
   looksLikeDetailPage,
   looksLikeChapterName,
+  chapterOrdinal,
+  cn2num,
+  jsFormTemplates,
+  R: require('../rules/rule.js'),
+  fetchText,
 };
