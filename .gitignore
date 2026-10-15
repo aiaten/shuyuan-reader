@@ -17,3 +17,5 @@ out/
 .idea/
 Thumbs.db
 desktop.ini
+
+tools/.push-files.json
