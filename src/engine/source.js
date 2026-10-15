@@ -56,6 +56,64 @@ function parseHeader(header) {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * 报错页 / 详情页识别（搜索兜底分支的护栏）
+ * ------------------------------------------------------------------ */
+
+/**
+ * 常见「服务器报错页 / 拦截页」特征词。
+ *
+ * 为什么需要：`search()` 在 `ruleSearch.bookList` 选不中元素时会走兜底分支，
+ * 把当前页面当成「列表页即详情页」解析一条。这条兜底是为「单结果搜索 302 到详情页」
+ * 设计的（实测得奇小说网），但站点接口报错时同样会选不中元素，于是
+ * **错误页会被当成一本真实存在的书**。
+ *
+ * 真实用例：速读谷搜索接口 `/i/sor.aspx` 坏掉后恒返回 HTTP 500 的 ASP.NET 错误页，
+ * 页里有 `<h1>“/”应用程序中的服务器错误。</h1>`，`ruleBookInfo.name` 命中 h1，
+ * 于是自检显示「搜索命中 1 条」，bookUrl 还是搜索地址本身 —— 假成功。
+ */
+const ERROR_PAGE_PATTERNS = [
+  /服务器错误|运行[时时]错误|应用程序中的服务器错误/,
+  /404\s*(Not\s*Found|错误|页面|找不到)/i,
+  /(页面|网页|资源)(不存在|未找到|无法找到|已删除)/,
+  /Not\s*Found|Page\s*not\s*found/i,
+  /Forbidden|Access\s*Denied|无权访问|禁止访问/i,
+  /(500|502|503|504)\s*(Internal|Bad|Service|Gateway)/i,
+  /请求过于频繁|访问频繁|请稍后再试|系统繁忙|服务(暂时)?不可用/,
+  /(Bad\s*Gateway|Service\s*Unavailable|Internal\s*Server\s*Error)/i,
+  /(安全|人机)验证|请完成验证|Cloudflare|Just\s*a\s*moment/i,
+];
+
+/** 页面看起来是报错页 / 拦截页吗（看 title 与首个 h1） */
+function looksLikeErrorPage($) {
+  const probe = [$('title').first().text(), $('h1').first().text()].join(' ').trim();
+  if (!probe) return false;
+  return ERROR_PAGE_PATTERNS.some((re) => re.test(probe));
+}
+
+/**
+ * 页面看起来是「书籍详情页」吗。
+ *
+ * 用于兜底分支的第二道判据：当搜索请求**没有发生跳转**（落点 == 搜索地址）时，
+ * 只有页面确实具备详情页形态才认它是一本书，否则宁可返回空。
+ * 判据取「目录容器」或「书籍元信息」任一命中 —— 都在常见书源模板里出现，
+ * 且报错页几乎不会同时具备。
+ */
+function looksLikeBookDetailPage($) {
+  const tocLike = $([
+    '#list', '#chapterlist', '#chapter-list', '#list-chapterAll',
+    '.listmain', '.chapterlist', '.chapter-list', '#dir', '.booklist',
+  ].join(',')).length;
+  if (tocLike > 0) return true;
+  const metaLike = $([
+    '[class*=booktitle]', '[class*=bookTitle]', '[class*=bookname]', '[class*=bookName]',
+    '[class*=bookinfo]', '[class*=bookInfo]', '[class*=bookintro]', '[class*=bookIntro]',
+    '[class*=author]', '[class*=zuozhe]',
+  ].join(',')).length;
+  const chapterLinks = $('a[href*=".html"]').length;
+  return metaLike > 0 && chapterLinks >= 3;
+}
+
 /** 展开 URL 模板里的占位符：{{key}} {{page}} {{searchKey}} 等 */
 function expandTemplate(tpl, vars) {
   return String(tpl).replace(/\{\{\s*([\s\S]*?)\s*\}\}/g, (_m, expr) => {
@@ -402,6 +460,22 @@ class SourceEngine {
           charset: options.charset,
         });
         const pageUrl = (land && land.url) || finalUrl;
+
+        // 但也可能只是「站点报错页」被误当详情页：实测速读谷搜索接口坏掉时
+        // 恒返回 HTTP 500 的 ASP.NET 错误页，页里有 <h1>“/”应用程序中的服务器错误。</h1>，
+        // ruleBookInfo.name 命中 h1 → 兜底分支返回 1 条「书」，bookUrl 还是搜索地址本身。
+        // 后果：书源自检显示「搜索命中 1 条」的假成功，用户点进去必然失败。
+        // 判据（任一即认为是报错页，不当成书）：
+        //   ① HTTP 状态 >= 400；
+        //   ② 页面标题/首个 h1 命中常见错误页特征词；
+        //   ③ 未发生跳转（落点就是搜索地址）且页面没有详情页迹象。
+        const httpStatus = (land && land.status) || 0;
+        if (httpStatus >= 400 || looksLikeErrorPage($)) return [];
+        if (!land || !land.url || land.url === finalUrl) {
+          // 没跳转：兜底只在页面看起来确实是详情页时才认（有目录容器或书籍元信息）
+          if (!looksLikeBookDetailPage($)) return [];
+        }
+
         const info = this._readBookInfo($, rt, pageUrl);
         if (!info.name) return [];
         return [{
