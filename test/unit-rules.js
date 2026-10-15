@@ -118,5 +118,93 @@ t('replaceRegex 为空时零开销直通', () => {
   assert.strictEqual(applyChapterReplaceRegex('abc', undefined), 'abc');
 });
 
+console.log('\n[4] 搜索兜底分支的报错页护栏（真实用例：速读谷搜索接口 500）');
+
+/* 从 source.js 里取真实实现，避免「测试里抄一份、实现改了测试还绿」。
+   两个函数都是模块内的纯函数（只依赖 cheerio 的 $），用源码正则抽出来 eval。 */
+const fs = require('fs');
+const srcText = fs.readFileSync(path.join(__dirname, '..', 'src', 'engine', 'source.js'), 'utf8');
+function grabFn(name) {
+  const i = srcText.indexOf(`function ${name}(`);
+  assert.ok(i >= 0, `源码里找不到 ${name}`);
+  // 从函数名起做花括号配平
+  const start = srcText.indexOf('{', i);
+  let depth = 0;
+  for (let j = start; j < srcText.length; j++) {
+    if (srcText[j] === '{') depth++;
+    else if (srcText[j] === '}') { depth--; if (depth === 0) return srcText.slice(i, j + 1); }
+  }
+  throw new Error(`${name} 花括号不配平`);
+}
+const ERROR_PAGE_RE = /const ERROR_PAGE_PATTERNS = \[[\s\S]*?\n\];/;
+const patMatch = srcText.match(ERROR_PAGE_RE);
+assert.ok(patMatch, '源码里找不到 ERROR_PAGE_PATTERNS');
+// eslint-disable-next-line no-eval
+const looksLikeErrorPage = eval(`(() => { ${patMatch[0]}\n ${grabFn('looksLikeErrorPage')}\n return looksLikeErrorPage; })()`);
+// eslint-disable-next-line no-eval
+const looksLikeBookDetailPage = eval(`(() => { ${grabFn('looksLikeBookDetailPage')}\n return looksLikeBookDetailPage; })()`);
+
+t('ASP.NET 500 错误页必须被识别（速读谷真实页面）', () => {
+  const $ = loadDoc('<html><head><title>运行时错误</title></head><body><h1>“/”应用程序中的服务器错误。</h1><p>说明: 服务器上出现应用程序错误。</p></body></html>');
+  assert.strictEqual(looksLikeErrorPage($), true, '必须认出这是报错页');
+});
+
+t('常见 404 / 拦截页也要认出', () => {
+  for (const html of [
+    '<html><head><title>404 Not Found</title></head><body><h1>404</h1></body></html>',
+    '<html><head><title>页面不存在</title></head><body></body></html>',
+    '<html><head><title>Just a moment...</title></head><body><h1>请完成验证</h1></body></html>',
+    '<html><head><title>502 Bad Gateway</title></head><body></body></html>',
+  ]) {
+    assert.strictEqual(looksLikeErrorPage(loadDoc(html)), true, '应识别: ' + html.slice(0, 50));
+  }
+});
+
+t('正常书籍详情页不能被误判成报错页', () => {
+  const $ = loadDoc('<html><head><title>大荒剑帝_速读谷</title></head><body><h1><i>585.4万字</i><a href="/1666/#dir">大荒剑帝</a></h1><div id="list"><li><a href="/1666/1.html">第一章</a></li></ul></div></body></html>');
+  assert.strictEqual(looksLikeErrorPage($), false, '详情页不是报错页');
+});
+
+t('详情页形态识别：#list 目录容器命中', () => {
+  const $ = loadDoc('<html><body><div id="list"><li><a href="/a/1.html">一</a></li><li><a href="/a/2.html">二</a></li></ul></div></body></html>');
+  assert.strictEqual(looksLikeBookDetailPage($), true, '有目录容器即认');
+});
+
+t('得奇小说网单结果搜索页（真详情页）仍被认作详情页 —— 护栏不能误伤这条正当兜底', () => {
+  const $ = loadDoc('<html><body><div id="list-chapterAll"><dd><a href="/books/639/1.html">第1章</a></dd><dd><a href="/books/639/2.html">第2章</a></dd><dd><a href="/books/639/3.html">第3章</a></dd></div></body></html>');
+  assert.strictEqual(looksLikeBookDetailPage($), true, '得奇用的是 div#list-chapterAll');
+});
+
+t('书籍元信息 + 多个章节链接也算详情页（无标准目录容器的站点）', () => {
+  const $ = loadDoc('<html><body><div class="bookinfo"><h1>某书</h1><span class="author">作者</span></div><a href="/x/1.html">1</a><a href="/x/2.html">2</a><a href="/x/3.html">3</a></body></html>');
+  assert.strictEqual(looksLikeBookDetailPage($), true, '元信息 + ≥3 章节链接应认');
+});
+
+t('报错页不具备详情页形态（兜底第二道判据要拦住它）', () => {
+  const $ = loadDoc('<html><head><title>运行时错误</title></head><body><h1>“/”应用程序中的服务器错误。</h1><p>堆栈跟踪…</p></body></html>');
+  assert.strictEqual(looksLikeBookDetailPage($), false, '报错页不该被当详情页');
+  assert.strictEqual(looksLikeErrorPage($), true, '且应被第一道判据认出');
+});
+
+console.log('\n[5] 正文分页选择器：文本匹配必须用 :contains()（真实用例：速读谷丢 3/4 正文）');
+
+t('「下一页」在元素文本里，a[href*=下一页] 命中 0 个（这是写错过的形态）', () => {
+  const $ = loadDoc('<div class="prenext"><span>上一章</span><a href="/1666/#dir">目录</a><span><a href="/1666/435178-2.html">下一页</a></span></div>');
+  assert.strictEqual($('a[href*=下一页]').length, 0, 'href 里没有「下一页」三个字，属性选择器必然失配');
+  assert.strictEqual($('a:contains(下一页)').length, 1, ':contains() 才是按文本匹配');
+});
+
+t(':contains(下一页)@href 能取出真实分页地址', () => {
+  const $ = loadDoc('<div class="prenext"><span><a href="/1666/435178-2.html">下一页</a></span></div>');
+  const ctx = { baseUrl: 'https://www.sudugu.org/1666/435178.html', source: {}, js: null };
+  const r = R.evalRule('a:contains(下一页)@href', $, ctx, {});
+  assert.strictEqual(String(r.text), '/1666/435178-2.html', `实得 ${JSON.stringify(String(r.text))}`);
+});
+
+t('末页没有「下一页」时应取不到（否则会死循环）', () => {
+  const $ = loadDoc('<div class="prenext"><span>上一章</span><a href="/1666/#dir">目录</a></div>');
+  assert.strictEqual($('a:contains(下一页)').length, 0, '末页应无命中');
+});
+
 console.log(`\n书源规则单测：通过 ${pass} · 失败 ${fail}`);
 process.exit(fail ? 1 : 0);
