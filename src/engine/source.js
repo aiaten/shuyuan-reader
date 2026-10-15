@@ -392,7 +392,17 @@ class SourceEngine {
       // 用 ruleBookInfo 解析一条（对齐 Legado BookList.kt:100-108 → getInfoItem）。
       // 注意绝不能拿 ruleSearch 的 name/bookUrl 去对整页求值：那样会把整页文本当成书名。
       if (!targets.length) {
-        const info = this._readBookInfo($, rt, finalUrl);
+        // 关键：搜索页可能 302 跳转到详情页（实测得奇小说网单结果搜索即如此，
+        // 引擎跟随跳转后拿到的是详情页 HTML，但 finalUrl 仍是原搜索地址）。
+        // http.js 返回的 `url` 是跳转后的最终地址，优先用它，否则 bookUrl 会写成搜索页。
+        const land = rt.prefetcher.peekSync(finalUrl, {
+          method,
+          body,
+          headers,
+          charset: options.charset,
+        });
+        const pageUrl = (land && land.url) || finalUrl;
+        const info = this._readBookInfo($, rt, pageUrl);
         if (!info.name) return [];
         return [{
           name: info.name.trim(),
@@ -732,8 +742,21 @@ class SourceEngine {
         }
       }
 
+      // 全文替换：ruleContent.replaceRegex（对齐 BookContent.kt:189-195）
+      // 与 `##` 后缀的区别：那条路径挂在【单条规则】上，只作用于选择器结果；
+      // 这里是【整章正文】拼接完成后的全局替换，书源常用它清广告/站点水印。
+      let body = pageTexts.join('\n\n');
+      if (rc.replaceRegex) {
+        try {
+          body = body.replace(new RegExp(String(rc.replaceRegex), 'g'), '');
+        } catch (e) {
+          // 非法正则不能让整章失败，记录诊断后原样返回
+          this.lastDiagnostics.errors.push(`ruleContent.replaceRegex 非法：${e.message}`);
+        }
+      }
+
       return {
-        text: cleanContent(pageTexts.join('\n\n')),
+        text: cleanContent(body),
         url,
         pageCount: pageTexts.length,
         pageUrls,

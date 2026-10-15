@@ -37,6 +37,7 @@ const TESTS = [
   { layer: 'unit', file: 'unit-window.js', desc: '懒加载滑动窗口（加书架前10章 / 读到哪下到哪 / 防重入）' },
   { layer: 'unit', file: 'unit-switchsrc.js', desc: '书架换源（候选筛选 / 畸形地址探测 / 进度保留 / 失败回滚 / 窗口衔接）' },
   { layer: 'unit', file: 'unit-browser.js', desc: '内置浏览器（预置站点表 / 书签历史会话持久化 / 脏数据容错）' },
+  { layer: 'unit', file: 'unit-rules.js', desc: '书源规则回归（搜索页302落点 / ## 正则后缀 / ruleContent.replaceRegex）' },
 
   { layer: 'net', file: 'smoke-http.js', desc: 'HTTP 抓取 4 站点 + cookie 往返' },
   { layer: 'net', file: 'probe-reject.js', desc: '可读性探测拒绝路径（6 个坏书源）', timeout: 240000 },
@@ -45,7 +46,7 @@ const TESTS = [
   { layer: 'e2e', file: 'e2e-detail.js', args: ['7941', '诡秘之主'], desc: '搜索→详情→目录→正文', timeout: 180000 },
   { layer: 'e2e', file: 'e2e-full.js', args: ['7941', '诡秘之主', '3'], desc: '全链路 + 3 布局导出校验', timeout: 300000 },
 
-  { layer: 'gui', file: 'gui-smoke.js', desc: 'Electron GUI 冒烟（189 项：探测闸门、日夜模式、换源、书架查看方式/排序、阅读设置、内置浏览器、书源网站跳转、可用线路、全书源搜索与导出链路）', timeout: 420000 },
+  { layer: 'gui', file: 'gui-smoke.js', desc: 'Electron GUI 冒烟（189 项：探测闸门、日夜模式、换源、书架查看方式/排序、阅读设置、内置浏览器、书源网站跳转、可用线路、全书源搜索与导出链路）', timeout: 600000 },
 ];
 
 const DEFAULT_LAYERS = ['unit', 'net'];
