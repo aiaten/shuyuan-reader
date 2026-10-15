@@ -891,3 +891,55 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 13
   font-size: 12px;
   line-height: 1.6;
 }
+
+/* ==================== 网页转书源（自动嗅探对话框） ==================== */
+.ag-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ag-steps {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.ag-step {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.ag-step b { flex: none; min-width: 84px; }
+.ag-mark { flex: none; width: 14px; font-weight: 700; }
+.ag-detail {
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.ag-ok { border-left: 3px solid var(--ok); }
+.ag-ok .ag-mark { color: var(--ok); }
+.ag-bad { border-left: 3px solid var(--err); background: var(--danger-bg); }
+.ag-bad .ag-mark { color: var(--err); }
+.ag-run { border-left: 3px solid var(--primary); }
+.ag-run .ag-mark { color: var(--primary); }
+.ag-json {
+  margin: 10px 0 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--badge-bg);
+  color: var(--text);
+  font-size: 11px;
+  line-height: 1.5;
+  max-height: 30vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

@@ -196,6 +196,8 @@ function registerIpc() {
   handle('source:get', (a, key) => a.getSource(key));
   handle('source:export', (a, keys) => a.exportSources(keys));
   handle('source:importText', (a, text) => a.importSources(text));
+  /* 网页转书源：输入小说网址 → 自动嗅探生成书源 JSON（只生成不入库，用户在界面确认后走 source:add） */
+  handle('source:autogen', (a, url, opts) => a.autogenSource(url, opts || {}));
 
   /* 搜索 */
   handle('search:one', (a, key, kw, page) => a.search(key, kw, page || 1));

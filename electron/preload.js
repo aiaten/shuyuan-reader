@@ -42,6 +42,8 @@ contextBridge.exposeInMainWorld('api', {
   sourceGet: (key) => call('source:get', key),
   sourceExport: (keys) => call('source:export', keys),
   sourceImportText: (text) => call('source:importText', text),
+  /** 网页转书源：给小说网址自动嗅探生成书源（返回 steps/notes/source，不入库） */
+  autogenSource: (url, opts) => call('source:autogen', url, opts || {}),
 
   /* 订阅源（yckceo RSS） */
   rssOnlineList: (opts) => call('rss:onlineList', opts),

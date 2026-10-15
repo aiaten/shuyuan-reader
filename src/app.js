@@ -111,6 +111,20 @@ class App {
     return { ok: pr.ok, allowed: gate.allowed, reason: gate.reason, probe: pr, errors: pr.errors };
   }
 
+  /**
+   * 网页转书源：给一个小说网址，自动嗅探结构生成 Legado 3.x 书源 JSON。
+   * 只生成、不入库——生成结果回给界面预览，用户确认后再走 addSource（含探测闸门）。
+   * @returns {Promise<{ok:boolean, source?:object, steps:array, notes:string[], error?:string, partial?:object}>}
+   */
+  async autogenSource(siteUrl, opts = {}) {
+    const { generateSource } = require('./source/autogen.js');
+    try {
+      return await generateSource(siteUrl, { logger: this.logger, keyword: opts.keyword });
+    } catch (e) {
+      return { ok: false, steps: [], notes: [], error: e.message || String(e) };
+    }
+  }
+
   importSources(text, opts = {}) {
     const list = SourceStore.parseImport(text);
     if (!list.length) throw new Error('没有解析出任何书源');

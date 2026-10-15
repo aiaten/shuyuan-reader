@@ -260,6 +260,8 @@ function modal({ title, body, buttons = [] }) {
     btn.className = 'btn ' + (b.class || '');
     btn.textContent = b.text;
     btn.onclick = b.onClick || (() => closeModal());
+    if (b.id) btn.id = b.id;
+    if (b.disabled) btn.disabled = true;
     foot.appendChild(btn);
   }
   $('#modalMask').classList.add('show');
@@ -1698,6 +1700,91 @@ async function importRssDialog() {
       $('#rssImportText').value = files[0].text || '';
     }
   };
+}
+
+/* ==================== 网页转书源 ==================== */
+
+let agLast = null; // 最近一次生成结果 { source, steps, notes }
+
+$('#btnOnlineAutogen').onclick = () => {
+  agLast = null;
+  modal({
+    title: '网页转书源（自动嗅探）',
+    body: `
+      <div class="ag-bar">
+        <input class="input grow" id="agUrl" placeholder="粘贴小说网址，如 https://www.xxx.com" />
+        <button class="btn primary" id="agGo">开始嗅探</button>
+      </div>
+      <p class="hint">自动识别搜索接口、书籍列表、详情页、目录、正文；正文靠 JS/AJAX 加载的站点会被拒绝。</p>
+      <div id="agSteps" class="ag-steps"></div>
+      <pre class="ag-json" id="agJson" hidden></pre>`,
+    buttons: [
+      { text: '添加到书源', id: 'agAdd', onClick: agAddClick, disabled: true },
+      { text: '关闭', onClick: closeModal },
+    ],
+  });
+  $('#agGo').onclick = agRun;
+  $('#agUrl').onkeydown = (e) => { if (e.key === 'Enter') agRun(); };
+};
+
+async function agRun() {
+  const url = ($('#agUrl').value || '').trim();
+  if (!/^https?:\/\//i.test(url)) return toast('请输入 http(s) 网址', 'err');
+  const go = $('#agGo');
+  go.disabled = true;
+  agRenderSteps([{ step: '嗅探', ok: null, detail: '进行中：' + url }]);
+  $('#agJson').hidden = true;
+  agSetAdd(false);
+  try {
+    const r = await window.api.autogenSource(url, {});
+    agLast = r && r.ok ? r : null;
+    agRenderSteps((r && r.steps) || [{ step: '失败', ok: false, detail: (r && r.error) || '无结果' }]);
+    if (r && r.ok && r.source) {
+      const j = $('#agJson');
+      j.hidden = false;
+      j.textContent = JSON.stringify(r.source, null, 2);
+      agSetAdd(true);
+      const notes = (r.notes || []);
+      toast('书源生成成功' + (notes.length ? `（${notes.length} 条提示）` : ''), 'ok');
+    } else {
+      const why = r && r.error ? r.error : '生成失败';
+      const notes = (r && r.notes) || [];
+      toast(why + (notes.length ? ' — ' + notes[0] : ''), 'err');
+    }
+  } catch (e) {
+    agRenderSteps([{ step: '错误', ok: false, detail: e.message || String(e) }]);
+  } finally {
+    const g = $('#agGo');
+    if (g) g.disabled = false;
+  }
+}
+
+function agRenderSteps(steps) {
+  const box = $('#agSteps');
+  if (!box) return;
+  box.innerHTML = (steps || []).map((s) => {
+    const mark = s.ok === true ? '✓' : s.ok === false ? '✗' : '·';
+    const cls = s.ok === true ? 'ag-ok' : s.ok === false ? 'ag-bad' : 'ag-run';
+    return `<div class="ag-step ${cls}"><span class="ag-mark">${mark}</span><b>${esc(s.name || s.step || '')}</b><span class="ag-detail">${esc(s.detail || '')}</span></div>`;
+  }).join('');
+}
+
+function agSetAdd(on) {
+  const btn = $('#agAdd');
+  if (btn) btn.disabled = !on;
+}
+
+async function agAddClick() {
+  if (!agLast || !agLast.source) return toast('还没有可用的生成结果', 'err');
+  const src = agLast.source;
+  agLast = null;
+  agSetAdd(false);
+  closeModal();
+  const r = await run('添加书源（自动探测）…', () => window.api.sourceAdd(src, {}));
+  if (!r) return;
+  if (r.added) toast(`已添加书源「${src.bookSourceName}」（探测 ${r.probe && r.probe.score != null ? r.probe.score : '?'} 分）`, 'ok');
+  else toast(`未添加：${r.reason || '探测未通过'}`, 'err');
+  loadSources();
 }
 
 /* ==================== 统计 ==================== */

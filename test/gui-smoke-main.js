@@ -517,6 +517,42 @@ const PROBE = `(async () => {
       r.func.rs = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.rs || {});
     }
 
+    // ---- m11586 网页转书源（按钮/对话框/前端拦截/后端兜底，全程不依赖外网） ----
+    try {
+      const otab = document.querySelector('.tab[data-view="online"]');
+      if (otab) { otab.click(); await new Promise((s) => setTimeout(s, 300)); }
+      const agBtn = document.querySelector('#btnOnlineAutogen');
+      r.func.ag = { btn: !!(agBtn && typeof agBtn.onclick === 'function') };
+      if (agBtn) {
+        agBtn.click();
+        await new Promise((s) => setTimeout(s, 300));
+        r.func.ag.title = (document.querySelector('#modalTitle') || {}).textContent || '';
+        r.func.ag.urlInput = !!document.querySelector('#agUrl');
+        r.func.ag.goBtn = !!document.querySelector('#agGo');
+        r.func.ag.stepsBox = !!document.querySelector('#agSteps');
+        const agFoot = document.querySelector('#modalFoot');
+        const agAddBtn = agFoot ? agFoot.querySelector('#agAdd') : null;
+        r.func.ag.addDisabled = !!(agAddBtn && agAddBtn.disabled);
+        // 非法输入：前端拦截，不发请求、不渲染步骤
+        const inp = document.querySelector('#agUrl');
+        if (inp) inp.value = 'abc';
+        const go = document.querySelector('#agGo');
+        if (go) go.click();
+        await new Promise((s) => setTimeout(s, 300));
+        r.func.ag.toast = (document.querySelector('#toastWrap') || {}).textContent || '';
+        r.func.ag.emptySteps = document.querySelectorAll('#agSteps .ag-step').length;
+        // 后端兜底：空网址直接报错（无网络）
+        const agBad = await window.api.autogenSource('', {});
+        r.func.ag.badOk = !!(agBad && agBad.ok === false);
+        r.func.ag.badErr = String((agBad && agBad.error) || '');
+        const closeBtn2 = document.querySelector('#modalClose');
+        if (closeBtn2) { closeBtn2.click(); await new Promise((s) => setTimeout(s, 200)); }
+        r.func.ag.closed = !document.querySelector('#modalMask.show');
+      }
+    } catch (e) {
+      r.func.ag = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.ag || {});
+    }
+
     // ---- m09109 需求③：内置浏览器页 ----
     // 回归点：<webview> 不带 src 时永不初始化 guest（点站点无反应）；
     // 且反复切到该页签不得重复建 guest（loadBrowser 只能初始化一次）。
@@ -961,6 +997,14 @@ app.whenReady().then(async () => {
   checks.push(['订阅源：文本导入新增 1', f.rssImportAdded === 1]);
   checks.push(['订阅源：本地共2 个', f.rssLocalCount === 2]);
   checks.push(['订阅源：清理后归零', f.rssLocalAfter === 0]);
+
+  // ---- m11586 网页转书源 ----
+  checks.push(['网页转书源：工具栏按钮可点', !!(f.ag && f.ag.btn)]);
+  checks.push(['网页转书源：对话框完整（标题/输入/嗅探钮/步骤区）', !!(f.ag && /网页转书源/.test(f.ag.title) && f.ag.urlInput && f.ag.goBtn && f.ag.stepsBox)]);
+  checks.push(['网页转书源：无结果时「添加」置灰', !!(f.ag && f.ag.addDisabled)]);
+  checks.push(['网页转书源：非法输入前端拦截且不发请求', !!(f.ag && /http/.test(f.ag.toast) && f.ag.emptySteps === 0)]);
+  checks.push(['网页转书源：空网址后端直接拒绝', !!(f.ag && f.ag.badOk && /不是合法的网址/.test(f.ag.badErr))]);
+  checks.push(['网页转书源：对话框可关闭', !!(f.ag && f.ag.closed)]);
   checks.push(['标红：seed 植入成功', !!(r_seed && r_seed.seeded === true)]);
   checks.push(['标红：在线列表命中最终小说网', f.zzzFound === true]);
   checks.push(['标红：列表渲染已稳定（无在飞请求回包）', f.listSettled === true]);
