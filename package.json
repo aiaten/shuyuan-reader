@@ -1,6 +1,6 @@
 {
   "name": "shuyuan-reader",
-  "version": "0.1.0",
+  "version": "0.2.4",
   "private": true,
   "description": "书源阅读器 - Legado 3.x 书源驱动的桌面小说阅读软件",
   "main": "electron/main.js",
