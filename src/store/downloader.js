@@ -65,6 +65,19 @@ function windowFor(index, total, opts = {}) {
   return { from, to };
 }
 
+/**
+ * 站点错误 stub 页：有些站把错误提示当正文返回（如「获取章节内容失败」、
+ * 「请勿开启浏览器阅读模式…」、「搜索太频繁」）。这类文本非空、按老逻辑会被
+ * 当成成功正文永久落盘，阅读器里就显示成一句错误提示。
+ * 判据：极短（≤120 字）且命中错误词表 → 记下载失败、不落盘，下次续传/重试自然绕开。
+ * 只认「整页几乎只有错误提示」的形态，正常章节（哪怕短）不会带这些套话。
+ */
+function looksLikeStubPage(text) {
+  const t = String(text || '').trim();
+  if (!t || t.length > 120) return false;
+  return /(获取|加载|读取)[^。\n]{0,8}(章节|内容)[^。\n]{0,8}失败|太频繁|稍后(再|重)试|请刷新|浏览器阅读模式|访问验证|人机?验证|内容缺失|章节缺失|内容已下架|章节错误/.test(t);
+}
+
 /** 并发执行，保持结果顺序 */
 async function mapLimit(items, limit, fn) {
   const out = new Array(items.length);
@@ -199,7 +212,17 @@ class Downloader {
         const next = toc[idx + 1];
         const res = await engine.content(ch.url, next ? { nextChapterUrl: next.url } : {});
         const text = res && res.text ? res.text : '';
-        if (!text.trim()) {
+        // 引擎常把章节标题作为首行返回；先剥掉与目录名一致的首行再判空/判 stub，
+        // 否则「清洗后只剩标题」的空壳章会顶着 15 个字混过守卫落盘。
+        let body = text;
+        const nm = String(ch.name || '').trim();
+        if (nm) {
+          const nl2 = body.indexOf('\n');
+          const first = (nl2 < 0 ? body : body.slice(0, nl2)).trim();
+          if (first && first === nm) body = nl2 < 0 ? '' : body.slice(nl2 + 1);
+        }
+        if (!body.trim() || looksLikeStubPage(body)) {
+          // 空正文或站点错误 stub 页 → 不落盘，避免把「获取章节内容失败」存成正文
           failedIndexes.push(idx);
           if (opts.onProgress) opts.onProgress({ index: idx, total: targets.length, status: 'empty' });
           return;
@@ -285,5 +308,5 @@ class Downloader {
 
 module.exports = {
   Downloader, parseConcurrentRate, mapLimit, bookIdOf,
-  windowFor, INITIAL_WINDOW, READAHEAD_WINDOW,
+  windowFor, INITIAL_WINDOW, READAHEAD_WINDOW, looksLikeStubPage,
 };

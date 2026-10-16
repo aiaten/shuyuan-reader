@@ -854,7 +854,17 @@ async function showChapter(idx) {
   if (nl > 0 && content.slice(0, nl).trim() === String(ch.name || '').trim()) {
     content = content.slice(nl + 1).replace(/^\n+/, '');
   }
-  body.innerHTML = `<div class="paper"><h1>${esc(ch.name || '第 ' + (idx + 1) + ' 章')}</h1>${esc(content)}</div>`;
+  let paper = `<div class="paper"><h1>${esc(ch.name || '第 ' + (idx + 1) + ' 章')}</h1>`;
+  if (looksLikeStubPage(content) || !content.trim()) {
+    // 旧数据里可能存过站点错误页/只剩标题的空壳章（守卫上线前下的）——提示并给一键重试
+    paper += '<p class="stub-warn">⚠ 这一章的正文缺失，或像是站点返回的错误提示，而不是小说内容。'
+      + '点下面按钮或右上角「⇩ 重新下载」重试。<br>'
+      + '<button class="btn primary" id="btnRedlInline">立即重新下载本章</button></p>';
+  }
+  paper += esc(content) + '</div>';
+  body.innerHTML = paper;
+  const bi = $('#btnRedlInline');
+  if (bi) bi.onclick = () => redownloadChapter(idx);
   body.scrollTop = 0;
   window.api.saveProgress(reader.bookId, { index: idx, percent: reader.toc.length ? idx / reader.toc.length : 0 }).catch(() => {});
   // 读到哪下到哪：读完本章就把后面 READAHEAD_WINDOW 章补上
@@ -863,6 +873,30 @@ async function showChapter(idx) {
 
 $('#btnPrevChapter').onclick = () => showChapter(reader.index - 1);
 $('#btnNextChapter').onclick = () => showChapter(reader.index + 1);
+$('#btnRefreshCh').onclick = () => { if (reader) showChapter(reader.index); };
+$('#btnRedlCh').onclick = () => { if (reader) redownloadChapter(reader.index); };
+
+/**
+ * 与 src/store/downloader.js 的 looksLikeStubPage 同判据（渲染端不能 require，抄一份）。
+ * 改动时两处一起改。
+ */
+function looksLikeStubPage(text) {
+  const t = String(text || '').trim();
+  if (!t || t.length > 120) return false;
+  return /(获取|加载|读取)[^。\n]{0,8}(章节|内容)[^。\n]{0,8}失败|太频繁|稍后(再|重)试|请刷新|浏览器阅读模式|访问验证|人机?验证|内容缺失|章节缺失|内容已下架|章节错误/.test(t);
+}
+
+/** 强制从书源重下当前章并覆盖本地文件（下载中站点又回错误页时保留旧文件，只提示） */
+async function redownloadChapter(idx) {
+  if (!reader || idx == null) return;
+  const bookId = reader.bookId;
+  const r = await run('重新下载本章…', () => window.api.download(bookId, { from: idx, to: idx, force: true }));
+  if (!r) return; // run() 已弹错误 toast
+  if (r.failed) toast('站点这次仍没给出正文（可能限流/验证），过一会儿再试', 'err');
+  else if (r.done) toast('本章已重新下载', 'ok');
+  else toast('本章没有变化', '');
+  if (reader && reader.bookId === bookId) await showChapter(idx);
+}
 $('#btnReaderBack').onclick = () => switchView('shelf');
 $('#btnExportBook').onclick = () => exportDialog(reader.book);
 document.addEventListener('keydown', (e) => {
