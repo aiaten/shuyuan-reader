@@ -521,6 +521,17 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 13
   padding-bottom: 14px;
   border-bottom: 1px solid var(--line);
 }
+/* 站点错误页被存成正文时的提示条（white-space:pre-wrap 下按钮需回到 normal） */
+.stub-warn {
+  white-space: normal;
+  background: var(--badge-warn-bg);
+  border: 1px solid var(--warn);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin: 0 0 20px;
+  line-height: 1.8;
+}
+.stub-warn .btn { margin-top: 8px; }
 
 /* ---------------- 阅读设置对话框 ---------------- */
 

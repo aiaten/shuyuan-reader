@@ -47,7 +47,7 @@ const TESTS = [
   { layer: 'e2e', file: 'e2e-detail.js', args: ['7941', '诡秘之主'], desc: '搜索→详情→目录→正文', timeout: 180000 },
   { layer: 'e2e', file: 'e2e-full.js', args: ['7941', '诡秘之主', '3'], desc: '全链路 + 3 布局导出校验', timeout: 300000 },
 
-  { layer: 'gui', file: 'gui-smoke.js', desc: 'Electron GUI 冒烟（195 项：探测闸门、日夜模式、换源、书架查看方式/排序、阅读设置、网页转书源、内置浏览器、书源网站跳转、可用线路、全书源搜索与导出链路）', timeout: 600000 },
+  { layer: 'gui', file: 'gui-smoke.js', desc: 'Electron GUI 冒烟（199 项：探测闸门、日夜模式、换源、书架查看方式/排序、阅读设置、网页转书源、内置浏览器、书源网站跳转、可用线路、全书源搜索与导出链路、阅读器stub重下）', timeout: 600000 },
 ];
 
 const DEFAULT_LAYERS = ['unit', 'net'];

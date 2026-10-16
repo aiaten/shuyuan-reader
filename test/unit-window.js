@@ -230,6 +230,60 @@ function mkFake(total, holes) {
     fs.rmSync(dir, { recursive: true, force: true });
   });
 
+  console.log('\n[5] 站点错误 stub 页守卫（获取章节内容失败 等）');
+
+  const { looksLikeStubPage } = require('../src/store/downloader');
+  const { SourceEngine } = require('../src/engine/source');
+
+  t('stub 判据：错误页文本命中、正常正文不误伤', () => {
+    assert.strictEqual(looksLikeStubPage('　　获取章节内容失败'), true, '「获取章节内容失败」应判为 stub');
+    assert.strictEqual(looksLikeStubPage('请勿开启浏览器阅读模式，否则将导致章节内容缺失及无法阅读下一章。'), true, '阅读模式提示应判为 stub');
+    assert.strictEqual(looksLikeStubPage('{"code":1,"msg":"搜索太频繁，请在 3 秒后再重新搜索","data":""}'), true, '限流提示应判为 stub');
+    assert.strictEqual(looksLikeStubPage(''), false, '空串交给空正文分支，不算 stub');
+    assert.strictEqual(looksLikeStubPage('这一战之后，他终于明白，所谓失败，不过是重新开始。'), false, '正常短正文不得误伤');
+    const long = '他低声说：获取章节内容失败。'.repeat(10); // >120 字 → 不再当 stub
+    assert.strictEqual(looksLikeStubPage(long), false, '超长文本不误伤');
+  });
+
+  await at('downloadChapters：stub 不落盘、记失败；重试成功才落盘', async () => {
+    const { app, dir, bookId } = mkFake(12, [3]);
+    const src = app.sources.get('http://x.test');
+    const orig = SourceEngine.prototype.content;
+    try {
+      SourceEngine.prototype.content = async () => ({ text: '　　获取章节内容失败' });
+      let r = await app.downloader.downloadChapters(src, bookId, { from: 3, to: 3 });
+      assert.strictEqual(r.failed, 1, 'stub 应记为失败');
+      assert.strictEqual(r.done, 0);
+      assert.strictEqual(app.library.chapter(bookId, 3), null, 'stub 不得写盘');
+
+      SourceEngine.prototype.content = async () => ({ text: '这是真正的正文，长度足够，不会被守卫拦下。' + '句子。'.repeat(30) });
+      r = await app.downloader.downloadChapters(src, bookId, { from: 3, to: 3 });
+      assert.strictEqual(r.done, 1, '正常正文应成功落盘');
+      assert.ok(/真正的正文/.test(app.library.chapter(bookId, 3) || ''));
+
+      // force 重下时站点又回 stub → 记失败且不覆盖已有好正文
+      SourceEngine.prototype.content = async () => ({ text: '获取章节内容失败' });
+      r = await app.downloader.downloadChapters(src, bookId, { from: 3, to: 3, force: true });
+      assert.strictEqual(r.failed, 1, 'force+stub 应记失败');
+      assert.ok(/真正的正文/.test(app.library.chapter(bookId, 3) || ''), '旧好正文不能被 stub 覆盖');
+
+      // force + 正常正文 → 覆盖成功（这就是「重新下载」的正路）
+      SourceEngine.prototype.content = async () => ({ text: '重下后的新正文。' + '内容。'.repeat(30) });
+      r = await app.downloader.downloadChapters(src, bookId, { from: 3, to: 3, force: true });
+      assert.strictEqual(r.done, 1);
+      assert.ok(/重下后的新正文/.test(app.library.chapter(bookId, 3) || ''), 'force 应覆盖旧文件');
+
+      // 「清洗后只剩标题」的空壳章：首行与目录名一致、剥掉后为空 → 记失败不落盘
+      SourceEngine.prototype.content = async () => ({ text: '第 4 章\n\n' });
+      r = await app.downloader.downloadChapters(src, bookId, { from: 3, to: 3, force: true });
+      assert.strictEqual(r.failed, 1, '只剩标题的空壳章应记失败');
+      assert.ok(/重下后的新正文/.test(app.library.chapter(bookId, 3) || ''), '空壳不得覆盖已有好正文');
+    } finally {
+      SourceEngine.prototype.content = orig;
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   console.log(`\n懒加载窗口单测：通过 ${pass} · 失败 ${fail}`);
   process.exit(fail ? 1 : 0);
 })();

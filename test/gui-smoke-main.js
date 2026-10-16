@@ -553,6 +553,40 @@ const PROBE = `(async () => {
       r.func.ag = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.ag || {});
     }
 
+    // ---- m13717 阅读器：刷新 / 重新下载按钮 + 站点错误页(stub)警示条 ----
+    // 注意：window.api 是 contextBridge 暴露的，属性只读、不可 monkey-patch；
+    // 但渲染端 app.js 是普通 script，顶层 function 声明都在 window 上，可直接调用/临时替换。
+    try {
+      const rd = {};
+      const rf = document.querySelector('#btnRefreshCh');
+      const rl = document.querySelector('#btnRedlCh');
+      rd.btns = !!(rf && rl && typeof rf.onclick === 'function' && typeof rl.onclick === 'function');
+      rd.fnFound = typeof window.looksLikeStubPage === 'function';
+      if (rd.fnFound) {
+        rd.stubHit = window.looksLikeStubPage('　　获取章节内容失败') === true;
+        rd.cleanMiss = window.looksLikeStubPage('这是一段完全正常的正文，讲的是主角如何一步步修炼。') === false;
+        const bs = await window.api.shelf();
+        const bk = (bs || []).find((b) => (b.downloaded || 0) > 0) || (bs || [])[0];
+        rd.bookPicked = !!bk;
+        if (bk) {
+          const origStub = window.looksLikeStubPage;
+          window.looksLikeStubPage = () => true;
+          await window.openReader(bk.id);
+          await new Promise((s) => setTimeout(s, 800));
+          rd.readerActive = !!document.querySelector('#view-reader.active');
+          rd.stubWarn = !!document.querySelector('#readerBody .stub-warn');
+          rd.inlineBtn = !!document.querySelector('#btnRedlInline');
+          window.looksLikeStubPage = origStub;
+          const back = document.querySelector('#btnReaderBack');
+          if (back) { back.click(); await new Promise((s) => setTimeout(s, 300)); }
+          rd.backOk = !!document.querySelector('#view-shelf.active');
+        }
+      }
+      r.func.rd = rd;
+    } catch (e) {
+      r.func.rd = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.rd || {});
+    }
+
     // ---- m09109 需求③：内置浏览器页 ----
     // 回归点：<webview> 不带 src 时永不初始化 guest（点站点无反应）；
     // 且反复切到该页签不得重复建 guest（loadBrowser 只能初始化一次）。
@@ -1084,6 +1118,13 @@ app.whenReady().then(async () => {
   checks.push(['阅读设置：改页宽生效', !!(f.rs && /^900px$/.test(f.rs.widthAfter || ''))]);
   checks.push(['阅读设置：恢复默认按钮存在且把字号还原', !!(f.rs && f.rs.resetBtnFound && /^17px$/.test(f.rs.sizeAfterReset || ''))]);
   checks.push(['阅读设置：关闭后对话框销毁', !!(f.rs && f.rs.modalClosed === true)]);
+
+  // ---- m13717 阅读器：刷新 / 重新下载 + stub 警示条 ----
+  checks.push(['阅读器：刷新/重新下载按钮存在且已绑定', !!(f.rd && f.rd.btns === true)]);
+  checks.push(['阅读器：stub 判据函数在渲染端可用且行为正确', !!(f.rd && f.rd.fnFound && f.rd.stubHit && f.rd.cleanMiss)]);
+  checks.push(['阅读器：能打开一本已下载的书并进入阅读页', !!(f.rd && f.rd.bookPicked && f.rd.readerActive)]);
+  checks.push(['阅读器：站点错误页正文渲染警示条与一键重下', !!(f.rd && f.rd.stubWarn && f.rd.inlineBtn)]);
+  checks.push(['阅读器：返回按钮能回到书架', !!(f.rd && f.rd.backOk === true)]);
 
   // ---- m09109 需求③：内置浏览器页 ----
   // 回归点：<webview> 必须带 src 才会初始化 guest，否则 dom-ready 不触发、
