@@ -16,6 +16,8 @@ const { mergeBookGroups, normTitle, normAuthor } = require('./search/merge');
 const yck = require('./source/yck');
 const { Library, bookIdOf } = require('./store/library');
 const { Downloader } = require('./store/downloader');
+const { DownloadQueue } = require('./store/download-queue');
+const { checkShelfUpdates, checkBook: checkBookUpdate } = require('./store/updater');
 const { exportTxt, exportLibrary, normalizeOptions, DEFAULTS } = require('./export/txt');
 
 /** 数据根目录：环境变量 SHUYUAN_DATA > <项目根>/data */
@@ -45,6 +47,17 @@ class App {
       dataDir: this.dataDir,
       concurrency: opts.concurrency || 4,
       logger: opts.logger,
+    });
+    /**
+     * 下载队列：界面点「下载」只入队，真正的抓取在队列里串行跑。
+     * 这样渲染进程永远不用 await 一个几百章的大任务，书架不再被遮罩锁死。
+     * opts.onDownloadEvent 由主进程接上，用来把任务快照推给界面。
+     */
+    this.downloads = new DownloadQueue({
+      library: this.library,
+      downloader: this.downloader,
+      dataDir: this.dataDir,
+      onChange: opts.onDownloadEvent || null,
     });
   }
 
@@ -1047,6 +1060,42 @@ class App {
     return this.library.toc(bookId);
   }
 
+  /**
+   * 检查书架里小说有没有更新（启动自动检查 / 书架「检查更新」按钮 / CLI check 共用）。
+   *
+   * 结果同时写回 shelf.json 的每本书（lastCheckAt / updateStatus / updateCount /
+   * latestChapter / updateError），界面据此渲染「有更新 / 已是最新 / 检查失败」徽标。
+   *
+   * @param {object} [opts]
+   * @param {string[]} [opts.bookIds] 只查这几本（留空=整个书架）
+   * @param {number} [opts.concurrency=3]
+   * @param {number} [opts.timeout=20000] 单本超时
+   * @param {boolean} [opts.applyToc=true] 远端纯追加时是否把新章写进本地目录
+   * @param {boolean} [opts.dryRun=false] 只比对不落盘
+   * @param {(ev:object)=>void} [opts.onProgress]
+   */
+  async checkUpdates(opts = {}) {
+    return checkShelfUpdates({
+      ...opts,
+      library: this.library,
+      sources: this.sources,
+      makeEngine: opts.makeEngine,
+    });
+  }
+
+  /** 只检查一本书（单本卡片上的「检查更新」） */
+  async checkBook(bookId, opts = {}) {
+    const book = this.library.get(bookId);
+    if (!book) throw new Error(`书架里没有这本书：${bookId}`);
+    return checkBookUpdate({
+      ...opts,
+      library: this.library,
+      sources: this.sources,
+      book,
+      makeEngine: opts.makeEngine,
+    });
+  }
+
   /** 加入书架（只抓目录，不下载正文） */
   /**
    * 加入书架。
@@ -1117,6 +1166,41 @@ class App {
     const src = this.sources.get(book.sourceKey);
     if (!src) throw new Error(`书源已不存在：${book.sourceKey}（可能已被删除，请重新添加）`);
     return this.downloader.downloadChapters(src, bookId, opts);
+  }
+
+  /* ==================== 下载队列（界面「下载」页签） ==================== */
+
+  /**
+   * 把一本书的下载任务交给队列。
+   *
+   * 与 download() 的区别：download() 是「同步等它下完」的原始能力（CLI / 单章重下用），
+   * 本方法是界面用的：立刻返回任务快照，进度靠 listDownloads() 轮询或事件推送获得。
+   * 同一本书已有排队/运行中的任务时，直接返回那一条（不叠加第二条流水线）。
+   *
+   * @param {string} bookId
+   * @param {object} [opts] { from, to, force }
+   */
+  enqueueDownload(bookId, opts = {}) {
+    const book = this.library.get(bookId);
+    if (!book) throw new Error("书架里没有这本书：" + bookId);
+    const src = this.sources.get(book.sourceKey);
+    if (!src) throw new Error("书源已不存在：" + book.sourceKey + "（可能已被删除，请重新添加）");
+    return this.downloads.enqueue({ bookId, from: opts.from, to: opts.to, force: opts.force });
+  }
+
+  /** 全部下载任务快照 + 概览（界面下载页签每次轮询拿这个） */
+  listDownloads() {
+    return { jobs: this.downloads.list(), summary: this.downloads.summary() };
+  }
+
+  /** 取消一条下载任务：排队中的立刻撤下，运行中的本章跑完即收手 */
+  cancelDownload(jobId) {
+    return this.downloads.cancel(jobId);
+  }
+
+  /** 清掉已结束的任务记录（排队/运行中的保留） */
+  clearFinishedDownloads() {
+    return this.downloads.clearFinished();
   }
 
   chapter(bookId, index) {

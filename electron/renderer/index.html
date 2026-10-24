@@ -12,6 +12,7 @@
     <div class="brand">书源阅读器</div>
     <nav class="tabs" id="tabs">
       <button class="tab active" data-view="shelf">书架</button>
+      <button class="tab" data-view="downloads" title="所有下载任务与实时进度（下载不再阻塞书架）">下载<span class="tab-dot" id="dlTabDot" hidden></span></button>
       <button class="tab" data-view="search">搜索</button>
       <button class="tab" data-view="sources">书源</button>
       <button class="tab" data-view="online">在线书源</button>
@@ -29,6 +30,9 @@
     <section class="view active" id="view-shelf">
       <div class="pane-toolbar">
         <button class="btn" id="btnRefreshShelf">刷新</button>
+        <button class="btn" id="btnCheckUpdates" title="抓取书源最新目录，检查书架内小说是否有更新（启动软件时也会自动检查一次）">🔄 检查更新</button>
+        <span class="hint" id="shelfCheckHint" hidden></span>
+        <button class="btn" id="btnGoDownloads" title="查看下载任务与进度">⇩ 下载</button>
         <button class="btn" id="btnExportShelf">导出全部为 TXT</button>
         <span class="spacer"></span>
         <select class="input select" id="shelfSort" title="排序方式">
@@ -44,6 +48,23 @@
         </div>
       </div>
       <div class="list" id="shelfList"></div>
+    </section>
+
+    <!-- ============ 下载（后台队列，不阻塞其它页签） ============ -->
+    <section class="view" id="view-downloads">
+      <div class="pane-toolbar">
+        <button class="btn" id="btnDlRefresh">刷新</button>
+        <button class="btn ghost" id="btnDlClear" title="清掉已结束的记录（不影响已下载的正文）">清空已完成</button>
+        <span class="hint" id="dlSummary"></span>
+        <span class="spacer"></span>
+        <div class="seg" id="dlFilter" title="按状态过滤">
+          <button class="seg-btn active" data-dlfilter="all">全部</button>
+          <button class="seg-btn" data-dlfilter="active">进行中</button>
+          <button class="seg-btn" data-dlfilter="finished">已完成</button>
+        </div>
+      </div>
+      <div class="dl-empty hint" id="dlEmpty">还没有下载任务。在书架里点任意一本书的「下载」就会出现在这里。</div>
+      <div class="list" id="dlList"></div>
     </section>
 
     <!-- ============ 搜索 ============ -->

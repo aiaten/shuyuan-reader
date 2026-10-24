@@ -178,7 +178,7 @@ class Downloader {
    * 下载正文。
    * @param {object} source 书源 JSON
    * @param {string} bookId
-   * @param {object} [opts] { from, to, force, onProgress }
+   * @param {object} [opts] { from, to, force, onProgress, shouldStop }
    * @returns {Promise<{total, done, skipped, failed, failedIndexes}>}
    */
   async downloadChapters(source, bookId, opts = {}) {
@@ -201,7 +201,12 @@ class Downloader {
 
     const engine = this._engine(source);
 
+    // 取消：DownloadQueue 传进来的 shouldStop，一旦为真就不再发起新的章节请求。
+    // 已经在飞的那几章会让它跑完（无副作用，落盘的是正常正文），之后立刻收手。
+    const stop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
+
     await mapLimit(targets, limit, async (ch) => {
+      if (stop()) return;
       const idx = ch.index;
       if (!opts.force && this.lib.chapter(bookId, idx) != null) {
         skipped++;

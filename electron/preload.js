@@ -75,6 +75,21 @@ contextBridge.exposeInMainWorld('api', {
   download: (id, opts) => call('shelf:download', id, opts),
   /** 懒加载：读到第 index 章时把后面若干章下下来（同一本书同时只跑一个） */
   downloadWindow: (id, index, opts) => call('shelf:downloadWindow', id, index, opts),
+  /**
+   * 下载队列（界面「下载」页签）。
+   * 书架点「下载」→ enqueueDownload 立刻返回任务快照，之后 list() 轮询 / onEvent 推送进度，
+   * 渲染进程不再 await 整个下载过程，所以不会把书架界面锁住。
+   */
+  enqueueDownload: (id, opts) => call('download:enqueue', id, opts),
+  listDownloads: () => call('download:list'),
+  cancelDownload: (jobId) => call('download:cancel', jobId),
+  clearFinishedDownloads: () => call('download:clear'),
+  /** 订阅下载任务变化（返回取消订阅函数） */
+  onDownloadEvent: (cb) => {
+    const fn = (_e, ev) => cb(ev);
+    ipcRenderer.on('download:event', fn);
+    return () => ipcRenderer.removeListener('download:event', fn);
+  },
   windowBusy: (id) => call('shelf:windowBusy', id),
   chapter: (id, index) => call('shelf:chapter', id, index),
   progress: (id) => call('shelf:progress', id),
@@ -83,6 +98,9 @@ contextBridge.exposeInMainWorld('api', {
   sourceCandidates: (id, opts) => call('shelf:sourceCandidates', id, opts),
   /** 换源：把这本书切到指定书源（默认保留阅读进度、不迁移旧正文） */
   changeSource: (id, key, opts) => call('shelf:changeSource', id, key, opts),
+  /** 检查更新：整书架（opts.bookIds 可限定几本）/ 单本；结果写回书架条目 */
+  checkUpdates: (opts) => call('shelf:checkUpdates', opts),
+  checkBook: (id, opts) => call('shelf:checkBook', id, opts),
 
   /* 导出 */
   exportBook: (id, opts) => call('export:book', id, opts),

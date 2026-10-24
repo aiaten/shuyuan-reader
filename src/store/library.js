@@ -99,6 +99,14 @@ class Library {
       chapterCount: idx >= 0 ? books[idx].chapterCount || 0 : 0,
       downloadedCount: idx >= 0 ? books[idx].downloadedCount || 0 : 0,
       lastReadIndex: idx >= 0 ? books[idx].lastReadIndex : -1,
+      // 最近一次「检查更新」的结果（启动自动检查 / 手动检查共用；0/'' 表示还没查过）
+      lastCheckAt: idx >= 0 ? books[idx].lastCheckAt || 0 : 0,
+      updateStatus: idx >= 0 ? books[idx].updateStatus || '' : '',
+      updateCount: idx >= 0 ? books[idx].updateCount || 0 : 0,
+      latestChapter: idx >= 0 ? books[idx].latestChapter || '' : '',
+      latestChapterCount: idx >= 0 ? books[idx].latestChapterCount || 0 : 0,
+      updateError: idx >= 0 ? books[idx].updateError || '' : '',
+      updateTocChanged: idx >= 0 ? !!books[idx].updateTocChanged : false,
     };
     if (idx >= 0) books[idx] = row;
     else books.push(row);

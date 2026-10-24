@@ -81,6 +81,10 @@ function getApp() {
     facade = new App({
       dataDir: process.env.SHUYUAN_DATA || undefined,
       logger: (m) => console.log('[app]', m),
+      // 下载队列每次任务快照变化都往界面推一次（界面的「下载」页签据此刷新进度）
+      onDownloadEvent: (ev) => {
+        if (win && !win.isDestroyed()) win.webContents.send('download:event', ev);
+      },
     });
   }
   return facade;
@@ -225,6 +229,11 @@ function registerIpc() {
   handle('shelf:add', (a, key, book, opts) => a.addToShelf(key, book, opts || {}));
   handle('shelf:download', (a, id, opts) => a.download(id, opts || {}));
   handle('shelf:downloadWindow', (a, id, index, opts) => a.downloadWindow(id, index, opts || {}));
+  /* 下载队列：界面点「下载」只入队，进度走 list/poll + download:event 推送，不阻塞书架 */
+  handle('download:enqueue', (a, id, opts) => a.enqueueDownload(id, opts || {}));
+  handle('download:list', (a) => a.listDownloads());
+  handle('download:cancel', (a, jobId) => a.cancelDownload(jobId));
+  handle('download:clear', (a) => a.clearFinishedDownloads());
   handle('shelf:windowBusy', (a, id) => ({ busy: a.windowBusy(id) }));
   handle('shelf:chapter', (a, id, index) => a.chapter(id, index));
   handle('shelf:progress', (a, id) => a.progress(id));
@@ -232,6 +241,9 @@ function registerIpc() {
   /* 换源：先给候选，再由用户挑一个换上 */
   handle('shelf:sourceCandidates', (a, id, opts) => a.sourceCandidates(id, opts || {}));
   handle('shelf:changeSource', (a, id, key, opts) => a.changeSource(id, key, opts || {}));
+  /* 检查更新：整书架 / 单本（启动自动检查也走这里，见 renderer init） */
+  handle('shelf:checkUpdates', (a, opts) => a.checkUpdates(opts || {}));
+  handle('shelf:checkBook', (a, id, opts) => a.checkBook(id, opts || {}));
 
   /* 导出 */
   handle('export:book', (a, id, opts) => a.exportBook(id, opts || {}));

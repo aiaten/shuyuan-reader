@@ -298,22 +298,271 @@ function pickNumber(title, def) {
 
 const loaders = {
   shelf: loadShelf,
+  downloads: () => refreshDownloads(false),
   sources: loadSources,
   online: () => { loadOnline(); loadRoute(false); },
   browser: loadBrowser,
 };
 
-function switchView(name) {
+function switchView(name, opts = {}) {
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
-  if (loaders[name]) loaders[name]();
+  // skipLoad：调用方自己负责加载（启动时先 await loadShelf 再自动检查更新，避免重复读盘）
+  if (loaders[name] && !opts.skipLoad) loaders[name]();
 }
 
 $$('.tab').forEach((t) => (t.onclick = () => switchView(t.dataset.view)));
 
+/* ==================== 下载（后台队列） ====================
+
+用户反馈：书架里点「下载」后界面就锁在「下载中…」转圈，几千章的小说能锁十几分钟。
+根因是渲染进程 `run('下载中…', () => window.api.download(...))` 把整块遮罩挂在了
+一个几百章的大任务上。现在改成：
+
+  1. `startDownload()` 只调 `window.api.enqueueDownload()` 入队，**立刻返回**；
+  2. 真正的抓取在主进程的 DownloadQueue 里串行跑（src/store/download-queue.js）；
+  3. 本页签靠轮询（POLL 定时器）+ `download:event` 推送两条路刷新进度；
+  4. 下载中切走页签照样在跑，书架完全不被阻塞。
+
+进度口径与主进程一致：percent 按「真正待下载的章数」算，跳过已下载的不算分母。 */
+
+/** 任务列表缓存（最近一次 listDownloads 的结果） */
+let dlCache = { jobs: [], summary: { queued: 0, running: 0, done: 0, error: 0, canceled: 0, interrupted: 0, active: 0 } };
+/** 当前过滤：all | active | finished */
+let dlFilter = 'all';
+/** 轮询定时器与节拍（有任务在跑才轮询，全部闲下来就停，避免白白占 CPU） */
+let dlTimer = null;
+const DL_POLL_MS = 900;
+/** 已经提示过的任务终态（bookId+jobId），避免同一件事反复 toast */
+const dlNotified = new Set();
+
+function dlStatusText(j) {
+  switch (j.status) {
+    case 'queued': return '排队中';
+    case 'running': return j.canceling ? '正在停止…' : '下载中';
+    case 'done': return '已完成';
+    case 'error': return '失败';
+    case 'canceled': return '已取消';
+    case 'interrupted': return '已中断';
+    default: return j.status;
+  }
+}
+
+function dlStatusBadge(j) {
+  const map = {
+    queued: 'badge info',
+    running: 'badge info',
+    done: 'badge ok',
+    error: 'badge err',
+    canceled: 'badge warn',
+    interrupted: 'badge warn',
+  };
+  return `<span class="${map[j.status] || 'badge'}">${esc(dlStatusText(j))}</span>`;
+}
+
+/** 秒 → 「3 分 20 秒」这种好读的写法 */
+function fmtDur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + ' 秒';
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + ' 分 ' + (s % 60) + ' 秒';
+  const h = Math.floor(m / 60);
+  return h + ' 时 ' + (m % 60) + ' 分';
+}
+
+/** 一条任务的进度/耗时描述 */
+function dlMetaLine(j) {
+  const span = `第 ${j.from + 1}–${j.to + 1} 章（共 ${j.total} 章）`;
+  const parts = [span];
+  if (j.status === 'running' || j.status === 'done' || j.status === 'canceled' || j.status === 'error') {
+    parts.push(`成功 ${j.done} · 跳过 ${j.skipped} · 失败 ${j.failed}`);
+  }
+  if (j.startedAt && j.finishedAt) parts.push(`耗时 ${fmtDur(j.finishedAt - j.startedAt)}`);
+  else if (j.startedAt) parts.push(`已用 ${fmtDur(Date.now() - j.startedAt)}`);
+  if (j.force) parts.push('强制重下');
+  return parts.join(' ｜ ');
+}
+
+/** 渲染整个下载页签 */
+function renderDownloads() {
+  const list = $('#dlList');
+  if (!list) return;
+  const s = dlCache.summary || {};
+  const jobs = (dlCache.jobs || []).filter((j) => {
+    if (dlFilter === 'active') return j.status === 'queued' || j.status === 'running';
+    if (dlFilter === 'finished') return j.status !== 'queued' && j.status !== 'running';
+    return true;
+  });
+
+  // 概览 + 页签小圆点
+  const sumEl = $('#dlSummary');
+  if (sumEl) {
+    const bits = [];
+    if (s.running) bits.push(`下载中 ${s.running}`);
+    if (s.queued) bits.push(`排队 ${s.queued}`);
+    if (s.done) bits.push(`已完成 ${s.done}`);
+    if (s.error) bits.push(`失败 ${s.error}`);
+    sumEl.textContent = bits.length ? bits.join(' · ') : '空闲';
+  }
+  const dot = $('#dlTabDot');
+  if (dot) dot.hidden = !(s.active > 0);
+
+  const empty = $('#dlEmpty');
+  if (empty) empty.hidden = jobs.length > 0;
+
+  list.innerHTML = jobs
+    .map((j) => {
+      const running = j.status === 'running';
+      const pct = running && j.force ? null : j.percent;
+      const barCls = 'dl-bar-in' + (pct == null ? ' indet' : '');
+      const barStyle = pct == null ? '' : ` style="width:${pct}%"\n`;
+      const pctText = pct == null ? '进行中' : pct + '%';
+      const canCancel = j.status === 'queued' || running;
+      return `
+      <div class="card dl-job" data-job="${esc(j.id)}" data-book="${esc(j.bookId)}">
+        <div class="card-main">
+          <div class="card-title">${esc(j.bookName)}
+            <span style="margin-left:8px">${dlStatusBadge(j)}</span></div>
+          <div class="dl-row">
+            <div class="dl-bar"><div class="${barCls}"${barStyle.trim() ? barStyle.trim() : ''}></div></div>
+            <span class="dl-pct">${esc(pctText)}</span>
+          </div>
+          <div class="dl-meta">${esc(dlMetaLine(j))}</div>
+          ${j.error ? `<div class="dl-meta"><span class="dl-err">${esc(j.error)}</span></div>` : ''}
+          ${j.failedIndexes && j.failedIndexes.length
+            ? `<div class="dl-meta">失败章节：${esc(j.failedIndexes.slice(0, 12).map((i) => i + 1).join(', '))}${j.failedIndexes.length > 12 ? ' …' : ''}（重新点下载会续传）</div>`
+            : ''}
+        </div>
+        <div class="dl-actions">
+          <button class="btn tiny" data-dlact="read" ${j.status === 'done' ? '' : 'disabled'}>阅读</button>
+          <button class="btn tiny ghost" data-dlact="cancel" ${canCancel ? '' : 'disabled'}>${running ? '停止' : '取消'}</button>
+          <button class="btn tiny ghost" data-dlact="retry" ${j.status === 'running' || j.status === 'queued' ? 'disabled' : ''}>重下</button>
+        </div>
+      </div>`;
+    })
+    .join('');
+
+  // 事件委托：一次绑定，重渲染不用重挂
+  list.onclick = async (e) => {
+    const btn = e.target.closest('[data-dlact]');
+    if (!btn || btn.disabled) return;
+    const card = btn.closest('[data-job]');
+    if (!card) return;
+    const jobId = card.dataset.job;
+    const bookId = card.dataset.book;
+    const act = btn.dataset.dlact;
+    if (act === 'read') {
+      openReader(bookId);
+    } else if (act === 'cancel') {
+      const r = await run('正在停止…', () => window.api.cancelDownload(jobId));
+      if (r) toast(r.status === 'canceled' ? '任务已取消' : '已请求停止，本章跑完就收手', 'ok');
+      await refreshDownloads();
+    } else if (act === 'retry') {
+      // 重下 = 用同一区间再入队一次（断点续传，已下载的章会跳过）
+      const job = (dlCache.jobs || []).find((x) => x.id === jobId);
+      if (job) await startDownload(bookId, { from: job.from, to: job.to });
+    }
+  };
+}
+
+/** 拉一次任务列表；有进行中的任务就继续轮询，全部结束就停表 */
+async function refreshDownloads(pushToast = false) {
+  let r;
+  try {
+    r = await window.api.listDownloads();
+  } catch (e) {
+    return; // 主进程暂时不可用：下一拍再试
+  }
+  if (!r) return;
+  const prev = new Map((dlCache.jobs || []).map((j) => [j.id, j]));
+  dlCache = r;
+  renderDownloads();
+
+  // 终态提示：只在「第一次看到这个任务结束」时弹一次
+  if (pushToast) {
+    for (const j of r.jobs || []) {
+      if (j.status === 'queued' || j.status === 'running') continue;
+      const key = j.id + '|' + j.status;
+      if (dlNotified.has(key)) continue;
+      const wasActive = prev.get(j.id) && (prev.get(j.id).status === 'queued' || prev.get(j.id).status === 'running');
+      if (!wasActive) continue; // 历史记录不重复刷屏
+      dlNotified.add(key);
+      if (j.status === 'done') {
+        toast(`《${j.bookName}》下载完成：成功 ${j.done}，失败 ${j.failed}`, j.failed ? 'err' : 'ok');
+      } else if (j.status === 'error') {
+        toast(`《${j.bookName}》下载失败：${j.error || '未知错误'}`, 'err');
+      } else if (j.status === 'canceled') {
+        toast(`《${j.bookName}》下载已取消`, '');
+      }
+      // 书架上的「已下载章数」跟着变，顺手刷新（不阻塞）
+      loadShelf();
+    }
+  }
+
+  // 轮询节奏：有活动任务 → 继续；否则停表（再次入队时重新启动）
+  const active = (r.summary && r.summary.active) || 0;
+  if (active > 0 && !dlTimer) {
+    dlTimer = setInterval(() => refreshDownloads(true), DL_POLL_MS);
+  } else if (active === 0 && dlTimer) {
+    clearInterval(dlTimer);
+    dlTimer = null;
+  }
+}
+
+/**
+ * 把一个下载任务交给主进程队列，立刻返回。
+ *
+ * 注意这里**故意不用 `run()`**：`run()` 会挂全屏遮罩并 await 整个调用，
+ * 正是「点下载界面就卡住」的根源。入队本身是毫秒级的，不需要遮罩；
+ * 真正的进度留给下载页签显示。
+ *
+ * @param {string} bookId
+ * @param {object} [opts] { from, to, force }
+ */
+async function startDownload(bookId, opts = {}) {
+  let job;
+  try {
+    job = await window.api.enqueueDownload(bookId, opts);
+  } catch (e) {
+    toast(e && e.message ? e.message : String(e), 'err');
+    return null;
+  }
+  if (!job) return null;
+  const tag = job.status === 'queued' ? '已加入下载队列' : '这本书正在下载中';
+  toast(`《${job.bookName}》${tag}：第 ${job.from + 1}–${job.to + 1} 章（进度见「下载」页签）`, 'ok');
+  await refreshDownloads();
+  return job;
+}
+
+/** 下载页签初始化：事件推送 + 首次拉取 */
+function initDownloads() {
+  renderDownloads();
+  window.api.onDownloadEvent(() => { refreshDownloads(true); });
+  $('#btnDlRefresh').onclick = () => refreshDownloads(false);
+  $('#btnDlClear').onclick = async () => {
+    const r = await run('清空…', () => window.api.clearFinishedDownloads());
+    if (r) toast(`已清掉 ${r.removed} 条记录`, 'ok');
+    await refreshDownloads();
+  };
+  $('#dlFilter .seg-btn').forEach((btn) => {
+    btn.onclick = () => {
+      dlFilter = btn.dataset.dlfilter;
+      $('#dlFilter .seg-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      renderDownloads();
+    };
+  });
+  $('#btnGoDownloads').onclick = () => switchView('downloads');
+  refreshDownloads(false);
+}
 /* ==================== 书架 ==================== */
 
 let shelfCache = [];
+
+/**
+ * 「检查更新」状态：auto=启动自动检查（只跑一次），manual=用户点按钮。
+ * 检查结果本身落在书架条目上（lastCheckAt/updateStatus/...），这里只放界面态。
+ */
+let shelfCheck = { running: false, auto: false, result: null, error: '' };
 
 /**
  * 书架查看方式：list（列表，默认）/ grid（图标）。
@@ -360,6 +609,80 @@ function sortShelf(list) {
   return arr;
 }
 
+/** 时间戳 → 今天 HH:MM / 昨天 HH:MM / MM-DD HH:MM */
+function fmtCheckTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const p = (x) => String(x).padStart(2, '0');
+  const now = new Date();
+  const hm = `${p(d.getHours())}:${p(d.getMinutes())}`;
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (sameDay) return hm;
+  const y = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+  if (d.getFullYear() === y.getFullYear() && d.getMonth() === y.getMonth() && d.getDate() === y.getDate()) return `昨天 ${hm}`;
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${hm}`;
+}
+
+/** 单本书的「更新状态」徽标（无检查记录时返回空串） */
+function updateBadge(b) {
+  const st = b.updateStatus || '';
+  if (!st) return '';
+  if (st === 'updated') {
+    const n = b.updateCount || 0;
+    return `<span class="badge ok" title="${esc(`发现 ${n} 章更新${b.latestChapter ? `，最新：${b.latestChapter}` : ''}`)}">🆕 有更新${n ? ` +${n} 章` : ''}</span>`;
+  }
+  if (st === 'changed') {
+    return `<span class="badge warn" title="目录内容/顺序与本地不一致（可能改版或删章），本地目录未自动覆盖">目录有变动</span>`;
+  }
+  if (st === 'latest') return `<span class="badge" title="已与书源目录一致">已是最新</span>`;
+  if (st === 'error' || st === 'missing-source') {
+    return `<span class="badge err" title="${esc(b.updateError || '检查失败')}">检查失败</span>`;
+  }
+  return '';
+}
+
+/** 书架工具栏上的检查结果提示 */
+function renderCheckHint() {
+  const el = $('#shelfCheckHint');
+  if (!el) return;
+  // 书架空了就别留着上一次的「N 本有更新」，否则会指向已经不存在的书
+  if (!shelfCache.length) {
+    el.hidden = true;
+    el.textContent = '';
+    return;
+  }
+  const r = shelfCheck.result;
+  const checkedAt = r && r.items && r.items.length
+    ? Math.max(...r.items.map((it) => {
+        const b = shelfCache.find((x) => x.id === it.bookId);
+        return (b && b.lastCheckAt) || 0;
+      }))
+    : (shelfCache.reduce((m, b) => Math.max(m, b.lastCheckAt || 0), 0));
+  if (shelfCheck.running) {
+    el.hidden = false;
+    el.textContent = shelfCheck.auto ? '正在自动检查更新' : '正在检查更新';
+    return;
+  }
+  if (shelfCheck.error) {
+    el.hidden = false;
+    el.textContent = `检查更新失败：${shelfCheck.error}`;
+    return;
+  }
+  if (!r) {
+    el.hidden = !checkedAt;
+    if (checkedAt) el.textContent = `上次检查：${fmtCheckTime(checkedAt)}`;
+    return;
+  }
+  el.hidden = false;
+  const parts = [];
+  if (r.updated) parts.push(`${r.updated} 本有更新`);
+  if (r.changed) parts.push(`${r.changed} 本目录有变动`);
+  if (!r.updated && !r.changed && r.checked) parts.push('全部已是最新');
+  if (r.failed) parts.push(`${r.failed} 本检查失败`);
+  el.textContent = `检查完成：${parts.join('，') || '书架是空的'}${checkedAt ? `（${fmtCheckTime(checkedAt)}）` : ''}`;
+}
+
 /** 应用查看方式：给列表容器加/去 .grid，并同步分段控件高亮 */
 function applyShelfLayout() {
   $('#shelfList').classList.toggle('grid', shelfLayout === 'grid');
@@ -370,6 +693,7 @@ async function loadShelf() {
   const books = (await run('读取书架…', () => window.api.shelf())) || [];
   shelfCache = books;
   renderShelf();
+  renderCheckHint();
 }
 
 function renderShelf() {
@@ -400,18 +724,22 @@ function renderShelf() {
           ${b.author ? esc(b.author) : '<i>未知作者</i>'}
           <span class="badge info">${esc(b.sourceName || '')}</span>
           <span class="badge ${got && got === total ? 'ok' : ''}">${got}/${total} 章</span>
+          ${updateBadge(b)}
+          ${b.lastCheckAt ? `<span class="hint">${esc(fmtCheckTime(b.lastCheckAt))} 查过</span>` : ''}
         </div>
         <div class="bar"><i style="width:${pct}%"></i></div>
       </div>
       <div class="card-actions">
         <button class="btn primary" data-act="read">阅读</button>
         <button class="btn" data-act="download">下载</button>
+        <button class="btn" data-act="check" title="只检查这本书在书源上有没有新章节">检查更新</button>
         <button class="btn" data-act="switch">换源</button>
         <button class="btn" data-act="export">导出TXT</button>
         <button class="btn danger" data-act="remove">移除</button>
       </div>`;
     el.querySelector('[data-act=read]').onclick = () => openReader(b.id);
     el.querySelector('[data-act=download]').onclick = () => downloadDialog(b);
+    el.querySelector('[data-act=check]').onclick = () => checkOneBookUpdate(b);
     el.querySelector('[data-act=switch]').onclick = () => switchSourceDialog(b);
     el.querySelector('[data-act=export]').onclick = () => exportDialog(b);
     el.querySelector('[data-act=remove]').onclick = () => {
@@ -441,6 +769,95 @@ function renderShelf() {
 
 $('#filterShelf').oninput = renderShelf;
 $('#btnRefreshShelf').onclick = loadShelf;
+
+/* ---------------- 检查书架更新（启动自动 + 手动按钮 + 单本） ---------------- */
+
+/** 把检查结果摘要转成一句人话 */
+function checkSummary(r) {
+  if (!r) return '检查完成';
+  const parts = [];
+  if (r.updated) parts.push(`${r.updated} 本有更新`);
+  if (r.changed) parts.push(`${r.changed} 本目录有变动`);
+  if (!r.updated && !r.changed && r.checked) parts.push('全部已是最新');
+  if (r.failed) parts.push(`${r.failed} 本检查失败`);
+  return parts.join('，') || '书架是空的';
+}
+
+/**
+ * 检查书架更新。
+ * @param {object} [opts]
+ * @param {boolean} [opts.auto=false] 启动自动检查（不弹全局 busy，只用工具栏提示）
+ * @param {string[]} [opts.bookIds] 只查指定书
+ */
+async function checkShelfUpdates(opts = {}) {
+  if (shelfCheck.running) return shelfCheck.result;
+  const books = opts.bookIds && opts.bookIds.length
+    ? shelfCache.filter((b) => opts.bookIds.includes(b.id))
+    : shelfCache;
+  if (!books.length) {
+    if (!opts.auto) toast('书架是空的，没有可检查的书', 'err');
+    return null;
+  }
+
+  shelfCheck = { running: true, auto: !!opts.auto, result: shelfCheck.result, error: '' };
+  const btn = $('#btnCheckUpdates');
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = '⏳ 检查中…';
+  }
+  renderCheckHint();
+
+  try {
+    const r = await window.api.checkUpdates({ bookIds: opts.bookIds || undefined });
+    shelfCheck = { running: false, auto: false, result: r, error: '' };
+    await loadShelf();
+    if (r) {
+      const msg = `检查更新：${checkSummary(r)}（${(r.elapsed / 1000).toFixed(1)}s）`;
+      toast(msg, r.failed && !r.updated && !r.changed ? 'err' : 'ok');
+    }
+    return r;
+  } catch (e) {
+    shelfCheck = { running: false, auto: false, result: shelfCheck.result, error: e && e.message ? e.message : String(e) };
+    if (!opts.auto) toast(shelfCheck.error, 'err');
+    return null;
+  } finally {
+    shelfCheck.running = false;
+    if (btn) {
+      btn.disabled = false;
+      btn.textContent = '🔄 检查更新';
+    }
+    renderCheckHint();
+  }
+}
+
+/** 启动时自动检查：等首屏书架渲染完再跑，失败只记提示，不打断使用 */
+async function autoCheckShelfUpdates() {
+  try {
+    if (!shelfCache.length) return;
+    await checkShelfUpdates({ auto: true });
+  } catch (e) {
+    console.warn('自动检查更新失败', e);
+  }
+}
+
+/** 单本检查更新：结果写回该书条目后局部刷新书架 */
+async function checkOneBookUpdate(book) {
+  if (shelfCheck.running) return toast('正在检查更新，请稍候', 'err');
+  const r = await run(`检查《${book.name}》更新`, () => window.api.checkBook(book.id, {}));
+  if (!r) return;
+  await loadShelf();
+  if (r.status === 'updated') {
+    toast(`《${book.name}》有更新：新增 ${r.addedCount} 章${r.latestChapter ? `，最新 ${r.latestChapter}` : ''}`, 'ok');
+  } else if (r.status === 'changed') {
+    toast(`《${book.name}》目录有变动（未自动覆盖本地目录）`, 'err');
+  } else if (r.status === 'latest') {
+    toast(`《${book.name}》已是最新`, 'ok');
+  } else {
+    toast(`《${book.name}》检查失败：${r.error || '未知错误'}`, 'err');
+  }
+}
+
+$('#btnCheckUpdates').onclick = () => checkShelfUpdates({ auto: false });
 
 /* 查看方式：列表 / 图标（只重渲染，不重新读书架） */
 $$('#shelfLayout .seg-btn').forEach((btn) => {
@@ -662,7 +1079,7 @@ function downloadDialog(book) {
         <input class="input" id="dlTo" type="number" min="1" max="${total}" placeholder="结束章" style="width:110px"/>
         <label class="check"><input type="checkbox" id="dlForce"/> 强制重新下载已存在的章节</label>
       </div>
-      <p class="hint" style="margin-top:10px">默认跳过已下载章节（断点续传）。</p>`,
+      <p class="hint" style="margin-top:10px">默认跳过已下载章节（断点续传）。下载在后台进行，可随时切到「下载」页签看进度。</p>`,
     buttons: [
       { text: '取消', onClick: closeModal },
       {
@@ -673,20 +1090,12 @@ function downloadDialog(book) {
           const t = parseInt($('#dlTo').value, 10);
           const force = $('#dlForce').checked;
           closeModal();
-          const r = await run('下载中…', () =>
-            window.api.download(book.id, {
-              from: Number.isFinite(f) ? Math.max(0, f - 1) : undefined,
-              to: Number.isFinite(t) ? Math.max(0, t - 1) : undefined,
-              force,
-            })
-          );
-          if (r) {
-            toast(`下载完成：成功 ${r.done}，跳过 ${r.skipped}，失败 ${r.failed}`, r.failed ? 'err' : 'ok');
-            if (r.failedIndexes && r.failedIndexes.length) {
-              console.warn('失败章节:', r.failedIndexes.map((i) => i + 1).join(', '));
-            }
-            loadShelf();
-          }
+          // 只入队，立刻返回：进度在「下载」页签里看，书架不再被遮罩锁住
+          startDownload(book.id, {
+            from: Number.isFinite(f) ? Math.max(0, f - 1) : undefined,
+            to: Number.isFinite(t) ? Math.max(0, t - 1) : undefined,
+            force,
+          });
         },
       },
     ],
@@ -1160,9 +1569,8 @@ async function addToShelf(sourceKey, book, download) {
   if (!r) return;
   toast(`《${r.name}》已加入书架，目录 ${r.chapterCount} 章`, 'ok');
   if (download) {
-    // 懒加载：只下前 10 章，不再一次下全书（长篇上千章会等到天荒地老）
-    const d = await run(`下载前 ${INITIAL_WINDOW} 章…`, () => window.api.downloadWindow(r.id, 0, {}));
-    if (d) toast(`已下好前 ${(d.from + 1)}-${(d.to + 1)} 章（成功 ${d.done}，失败 ${d.failed}），读到哪下到哪`, d.failed ? 'err' : 'ok');
+    // 不再一次下全书（长篇上千章会等到天荒地老），也不再 await：交给下载队列
+    await startDownload(r.id, { from: 0, to: INITIAL_WINDOW - 1 });
   }
   if ($('#view-search').classList.contains('active')) loadShelf();
 }
@@ -2461,5 +2869,11 @@ window.addEventListener('beforeunload', () => {
   // 书架排序方式回填到下拉框（查看方式由 renderShelf 的 applyShelfLayout 处理）
   $('#shelfSort').value = shelfSort;
   await fillSourceSelect();
-  switchView('shelf');
+  // 先读一次书架（首屏），再自动检查更新：否则 shelfCache 还是空的，会直接跳过
+  switchView('shelf', { skipLoad: true });
+  await loadShelf();
+  // 下载页签：先装事件订阅并拉一次历史任务，之后入队立即能在页签里看到
+  initDownloads();
+  // 每次打开软件自动检查一次书架更新（后台跑；结果只写回书架条目）
+  autoCheckShelfUpdates();
 })();

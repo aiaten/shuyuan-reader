@@ -16,6 +16,7 @@
  *   source import <file.json> [--no-probe]
  *   search <书名> [--source KEY] [--page N]
  *   search <书名> --everywhere              全书源聚合搜索（并发/增量/熔断）
+ *   check [--book <bookId>] [--dry-run] [--concurrency N]   检查书架小说有没有更新
  *   shelf                              书架列表
  *   add <sourceKey> <bookUrl>          按书地址加入书架（抓目录）
  *   download <bookId> [--from N] [--to N] [--force]
@@ -119,6 +120,7 @@ const HELP = `书源阅读器 CLI
   search <关键词> [--source KEY] [--page N]              单源搜索
   search <关键词> --everywhere [--concurrency N] [--timeout MS]
                                                          全书源聚合搜索（并发+增量+超时熔断）
+  check [--book <bookId>] [--dry-run] [--concurrency N]   检查书架小说有没有更新
   shelf
   add <sourceKey> <bookUrl> [--download] [--to N]
   download <bookId> [--from N] [--to N] [--force]
@@ -438,6 +440,24 @@ async function cmdSearch(app, { pos, flags }) {
   if (!total) console.log('\n（无结果）');
 }
 
+async function cmdCheck(app, { pos, flags }) {
+  const bookId = flags.book || pos[0] || null;
+  const r = await app.checkUpdates({
+    bookIds: bookId ? [bookId] : undefined,
+    dryRun: !!flags['dry-run'],
+    concurrency: flags.concurrency ? parseInt(flags.concurrency, 10) : 3,
+    onProgress: (it) => {
+      const tag = it.status === 'updated' ? `有更新 +${it.addedCount} 章`
+        : it.status === 'changed' ? '目录有变动'
+        : it.status === 'latest' ? '已是最新'
+        : `失败：${it.error}`;
+      console.log(`  ${pad(it.name.slice(0, 24), 26)}${it.oldCount} → ${it.newCount} 章  ${tag}`);
+    },
+  });
+  console.log(`\n共 ${r.total} 本：有更新 ${r.updated}，目录变动 ${r.changed}，已最新 ${r.latest}，失败 ${r.failed}（${(r.elapsed / 1000).toFixed(1)}s）`);
+  if (flags['dry-run']) console.log('（dry-run：未写入书架状态与目录）');
+}
+
 async function cmdShelf(app) {
   const books = app.shelf();
   if (!books.length) {
@@ -580,6 +600,9 @@ async function main() {
       break;
     case 'search':
       await cmdSearch(app, { pos, flags });
+      break;
+    case 'check':
+      await cmdCheck(app, { pos, flags });
       break;
     case 'shelf':
       await cmdShelf(app, { pos, flags });

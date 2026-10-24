@@ -102,6 +102,11 @@ let r_seed = null;
 
 /** 断言脚本：在渲染进程里跑，返回结构化结果 */
 const PROBE = `(async () => {
+  // 看门狗：任何一步（尤其真网请求）卡住都不能变成「没有结果文件」这种无信息失败。
+  // 超时后把已跑到的段落信息带出来，主进程照常断言并打印。
+  const __watch = (ms) => new Promise((res) => setTimeout(() => res({ __timeout: true }), ms));
+  const __body = async () => {
+
   console.log('[PROBE] start');
   // 各段落耗时：整体必须压在 MAX_MS（120s）以内，超时会让整个冒烟「没有结果文件」。
   // 出问题时先看这里的分布，别靠猜。
@@ -270,7 +275,48 @@ const PROBE = `(async () => {
         r.func.bookName = rec && rec.name;
         r.func.bookDownloaded = rec && rec.downloadedCount;
 
-        // ---- 懒加载滑动窗口（m07558）----
+        // ---- 下载页签（后台队列 / 不再卡书架）----
+    // 关键行为：点「下载」只入队立刻返回，进度在「下载」页签里看。
+    try {
+      const dlq = (r.func.dlq = {});
+      const tab = document.querySelector('.tab[data-view="downloads"]');
+      dlq.tab = !!tab;
+      dlq.tabText = tab ? (tab.textContent || "").trim() : "";
+      dlq.panel = !!document.querySelector("#view-downloads");
+      dlq.list = !!document.querySelector("#dlList");
+      dlq.refreshBtn = !!document.querySelector("#btnDlRefresh");
+      dlq.clearBtn = !!document.querySelector("#btnDlClear");
+      dlq.filter = !!document.querySelector("#dlFilter");
+      // 入队必须「立刻」返回：120ms 预算足够跨一次 IPC，远不足以跑完真站下载。
+      // 以前就是 await 整个下载过程，界面被遮罩锁死（用户反馈的「点下载就卡住」）。
+      const t0 = Date.now();
+      let job = null, err = "";
+      try {
+        job = await window.api.enqueueDownload(bid, { from: 0, to: 1 });
+      } catch (e) { err = (e && e.message) || String(e); }
+      dlq.enqueueMs = Date.now() - t0;
+      dlq.enqueueErr = err;
+      dlq.jobId = job && job.id;
+      dlq.jobBookId = job && job.bookId;
+      dlq.jobStatus = job && job.status;
+      const snap = await window.api.listDownloads();
+      const jobs = (snap && snap.jobs) || [];
+      dlq.count = jobs.length;
+      dlq.hasJob = !!jobs.find((j) => j.id === (job && job.id));
+      dlq.summary = snap && snap.summary;
+      // 渲染层：切到下载页签，列表里应有这一行且带进度元素
+      if (tab) tab.click();
+      await new Promise((res) => setTimeout(res, 500));
+      const row = document.querySelector("#dlList .dl-job[data-job], #dlList .card");
+      dlq.rowRendered = !!row;
+      dlq.rowText = row ? (row.textContent || "").replace(/\s+/g, " ").trim().slice(0, 120) : "";
+      dlq.progressEl = !!document.querySelector("#dlList .dl-bar-in, #dlList .dl-pct");
+    } catch (e) {
+      r.func.dlq = r.func.dlq || {};
+      r.func.dlq.blockThrew = String((e && e.message) || e);
+    }
+
+    // ---- 懒加载滑动窗口（m07558）----
         // 1) 加书架时只下前 10 章（而不是全书）
         const added2 = await window.api.addToShelf(g0.sourceKey, book, { download: true });
         const w0 = added2 && added2.download;
@@ -340,7 +386,12 @@ const PROBE = `(async () => {
     const routeBar = document.querySelector('#onlineRouteBar');
     r.func.routeBarExists = !!routeBar;
     // 2) 线路强制重探：真网，必须命中 yck 家族域名之一
-    const rtRetry = await window.api.onlineRoute({ retry: true, check: true });
+    // 真网重探：站点偶发不响应时 yck.list 可能长时间挂着（实测会超过 MAX_MS）。
+    // 这里给它一个硬上限，超时按「本次没探出来」记，不让整个冒烟变成「没有结果文件」。
+    const rtRetry = await Promise.race([
+      window.api.onlineRoute({ retry: true, check: true }),
+      new Promise((res) => setTimeout(() => res({ ok: false, checked: false, error: "route-retry-timeout" }), 45000)),
+    ]);
     r.func.routeRetry = {
       ok: !!(rtRetry && rtRetry.ok),
       shuyuan: rtRetry && rtRetry.shuyuan,
@@ -358,9 +409,12 @@ const PROBE = `(async () => {
     const ewEvents = [];
     const ewOff = window.api.onSearchEvent((ev) => ewEvents.push({ type: ev.type, ok: !!ev.ok, count: ev.count || 0 }));
     const t0 = Date.now();
-    const ew = await window.api.searchEverywhere('诡秘之主', {
-      page: 1, concurrency: 6, perSourceTimeout: 8000, totalTimeout: 20000,
-    });
+    const ew = await Promise.race([
+      window.api.searchEverywhere('诡秘之主', {
+        page: 1, concurrency: 6, perSourceTimeout: 8000, totalTimeout: 20000,
+      }),
+      new Promise((res) => setTimeout(() => res({ ok: false, total: 0, groups: [], sources: [], elapsed: 60000 }), 60000)),
+    ]);
     const ewElapsed = Date.now() - t0;
     if (ewOff) ewOff();
     const ewG0 = ew && ew.groups && ew.groups[0];
@@ -876,6 +930,15 @@ const PROBE = `(async () => {
     r.fatalStack = e.stack;
   }
   return r;
+  };
+  try {
+    const __out = await Promise.race([__body(), __watch(Number(window.__probeBudgetMs) || 300000)]);
+    return __out && __out.__timeout
+      ? { fatal: "PROBE 看门狗超时（默认 300s）：有一步真网请求没返回", func: {} }
+      : __out;
+  } catch (e) {
+    return { fatal: String((e && e.message) || e), fatalStack: e && e.stack, func: {} };
+  }
 })()`;
 
 
@@ -941,7 +1004,13 @@ app.whenReady().then(async () => {
       app.exit(1);
       return;
     }
-    res = await win.webContents.executeJavaScript(PROBE, true);
+    // PROBE 的看门狗预算：给渲染侧一个总时限，任何一步真网请求挂死都能把已跑到的段落带回来。
+    // 默认 240s，小于 harness 的 MAX_MS(420s)，保证「看门狗先响 → 有结果文件 → 能看到哪一步卡了」。
+    const probeBudgetMs = Number(process.env.SHUYUAN_PROBE_BUDGET_MS) || 240000;
+    res = await win.webContents.executeJavaScript(
+      'window.__probeBudgetMs = ' + probeBudgetMs + ';' + PROBE,
+      true
+    );
     // webview guest 数只有主进程看得到；PROBE 只能数 DOM 里的 <webview>。
     // 这里补上真实 guest 数，用来验证「反复切页签不泄漏 guest」。
     try {
@@ -1007,6 +1076,17 @@ app.whenReady().then(async () => {
   checks.push(['成书后有已下载章节', (f.bookDownloaded || 0) > 0]);
 
   // ---- 懒加载窗口（m07558）---
+  // ---- 下载页签（后台队列）----
+  checks.push(['下载：导航里有「下载」页签', !!(f.dlq && f.dlq.tab)]);
+  checks.push(['下载：面板/列表/刷新/清空/过滤都在', !!(f.dlq && f.dlq.panel && f.dlq.list && f.dlq.refreshBtn && f.dlq.clearBtn && f.dlq.filter)]);
+  checks.push(['下载：enqueueDownload 立刻返回（<120ms，不阻塞界面）', !!(f.dlq && f.dlq.enqueueMs < 120)]);
+  checks.push(['下载：入队不抛错', !!(f.dlq && !f.dlq.enqueueErr)]);
+  checks.push(['下载：入队返回任务快照（id/bookId 对上）', !!(f.dlq && f.dlq.jobId && f.dlq.jobBookId === f.shelfBookId)]);
+  checks.push(['下载：listDownloads 里能查到该任务', !!(f.dlq && f.dlq.hasJob)]);
+  checks.push(['下载：summary 结构完整', !!(f.dlq && f.dlq.summary && typeof f.dlq.summary.active === "number")]);
+  checks.push(['下载：页签里渲染出任务行', !!(f.dlq && f.dlq.rowRendered)]);
+  checks.push(['下载：任务行含进度元素', !!(f.dlq && f.dlq.progressEl)]);
+
   checks.push(['窗口：加书架初始段从第1 章起', f.winInitialFrom === 0]);
   checks.push(['窗口：加书架只下前10 章（末章 = 第10 章）', f.winInitialTo === 9]);
   // 之前已单独下过第 1-2 章，所以done 只统计新下的；关键是「窗口覆盖10 章」且「已下载的不重下。
