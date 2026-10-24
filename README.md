@@ -58,7 +58,7 @@ novel-reader/
 ├─ electron/             桌面 UI（main / preload / renderer）
 ├─ scripts/start.js      `pnpm start` 入口
 ├─ docs/                 文档（Legado 规则规范）
-└─ test/                 测试（16 unit + 3 net + 2 e2e + 1 gui）
+└─ test/                 测试（17 unit + 3 net + 2 e2e + 1 gui）
 ```
 
 ## 本地存储
@@ -218,10 +218,10 @@ node tools/api-push.js <owner/repo> <ref> <父提交sha> <文件相对路径> <�
 ## 测试
 
 ```
-node test/run.js unit     # 16 个纯离线单元测试（秒级）
+node test/run.js unit     # 17 个纯离线单元测试（秒级）
 node test/run.js net      # 3 个联网测试（真实站点）
 node test/run.js e2e      # 2 个端到端（搜索→下载→导出）
-node test/run.js --all    # 全部 22 项（含 GUI 208 项断言）
+node test/run.js --all    # 全部 23 项（含 GUI 208 项断言）
 ```
 
 覆盖：Cookie 域语义、编码识别（GBK 假 utf-8 回退）、Legado 规则引擎（索引/切片/
