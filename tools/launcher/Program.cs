@@ -38,6 +38,11 @@ namespace ShuyuanReader
 
         private static readonly object LogLock = new object();
         private static string _logFile;
+        /// <summary>程序根目录（Fail 在 CLI 模式下只写日志不弹框）。</summary>
+        private static string _root;
+        private static bool _runCli;
+        /// <summary>边车文件里指定的数据目录（可空）：注入 SHUYUAN_DATA 给 Node 用。</summary>
+        private static string _dataDir;
 
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern bool AttachConsole(uint dwProcessId);
@@ -59,19 +64,27 @@ namespace ShuyuanReader
             bool cliMode = false;
             for (int i = 0; i < args.Count; i++)
             {
-                if (args[i] == "--cli") { cliMode = true; args.RemoveAt(i); break; }
+                if (args[i] == "--cli") { cliMode = true; _runCli = true; args.RemoveAt(i); break; }
             }
 
             string root = null;
             try
             {
                 string rootVia;
-                root = FindProjectRoot(out rootVia);
+                root = FindProjectRoot(out rootVia, out _dataDir);
                 string nodeVia;
                 string node = FindNode(root, out nodeVia);
 
                 if (cliMode)
                 {
+                    // CLI 也认边车文件里的数据目录（否则 --cli 看到的和 GUI 不是同一份书架）。
+                    // 透传交给子进程的 argv：启动器可能是在另一个 shell 里被单独调用，
+                    // 只设 Process 级环境变量时 SHUYUAN_DATA 传不到 node（实测会被吞掉）。
+                    if (!string.IsNullOrEmpty(_dataDir) && !HasDataArg(args))
+                    {
+                        args.Add("--data");
+                        args.Add(_dataDir);
+                    }
                     return RunCli(root, node, args);
                 }
 
@@ -88,11 +101,22 @@ namespace ShuyuanReader
             }
         }
 
+        /// <summary>命令行里是否已经带了 --data / --data=。</summary>
+        private static bool HasDataArg(List<string> args)
+        {
+            for (int i = 0; i < args.Count; i++)
+            {
+                if (args[i] == "--data" || args[i].StartsWith("--data=")) return true;
+            }
+            return false;
+        }
+
         /* ==================== 项目根定位 ==================== */
 
-        private static string FindProjectRoot(out string via)
+        private static string FindProjectRoot(out string via, out string dataDir)
         {
             via = null;
+            dataDir = null;
             string exePath = Process.GetCurrentProcess().MainModule.FileName;
             string exeDir = Path.GetDirectoryName(exePath);
 
@@ -116,9 +140,32 @@ namespace ShuyuanReader
                     string line = FirstNonEmptyLine(sidecar);
                     if (!string.IsNullOrEmpty(line))
                     {
-                        string target = Path.IsPathRooted(line) ? line : Path.Combine(dir, line);
+                        // 允许写 %USERPROFILE%\ShuyuanReader 这类环境变量引用（绿色版分发包就是这么写的，
+                        // 把数据目录指到用户目录，避开程序目录里的读写权限问题）。
+                        // 格式：`<项目根>` 或 `<项目根>|<数据目录>`（后者是绿色版用的，
+                        // 把一个纯 ASCII 的用户目录同时当作项目根和数据目录）。
+                        string rootPart = line.Trim();
+                        string dataPart = null;
+                        int bar = rootPart.IndexOf('|');
+                        if (bar >= 0)
+                        {
+                            dataPart = rootPart.Substring(bar + 1).Trim();
+                            rootPart = rootPart.Substring(0, bar).Trim();
+                        }
+                        // 根留空（形如 `|D:\data`）表示「沿用 exe 所在目录」：
+                        // 项目根必须含 package.json + scripts/start.js，散包里那玩意儿就在 exe 旁边，
+                        // 不能指到用户目录去（指过去 IsProjectRoot 会判失败、退回 exe 目录）。
+                        string expanded = Environment.ExpandEnvironmentVariables(rootPart);
+                        string target = string.IsNullOrEmpty(expanded)
+                            ? exeDir
+                            : (Path.IsPathRooted(expanded) ? expanded : Path.Combine(dir, expanded));
                         if (IsProjectRoot(target))
                         {
+                            if (!string.IsNullOrEmpty(dataPart))
+                            {
+                                string d = Environment.ExpandEnvironmentVariables(dataPart);
+                                dataDir = Path.IsPathRooted(d) ? d : Path.Combine(Path.GetFullPath(target), d);
+                            }
                             via = "边车文件 " + SidecarName;
                             return Path.GetFullPath(target);
                         }
@@ -328,6 +375,12 @@ namespace ShuyuanReader
                 // 排障开关 SHUYUAN_LAUNCH_MODE=raw 时不碰它，用于区分是不是这一步造成差异。
                 try { psi.EnvironmentVariables.Remove("ELECTRON_RUN_AS_NODE"); }
                 catch { }
+                // 边车文件指定了数据目录时注入进去（散包把书架放用户目录，与程序目录分离）。
+                if (!string.IsNullOrEmpty(_dataDir))
+                {
+                    try { psi.EnvironmentVariables["SHUYUAN_DATA"] = _dataDir; }
+                    catch { }
+                }
             }
             return psi;
         }
@@ -359,8 +412,11 @@ namespace ShuyuanReader
             {
                 p.OutputDataReceived += delegate(object s, DataReceivedEventArgs e)
                 {
-                    if (e.Data != null) Log(root, "[out] " + e.Data);
+                    // node/electron 正常运行时几乎不写 stdout，别把空行灌进日志（以前每行都记，
+                    // 日志里全是空的 [out]，真正有用的那行崩溃信息反而被挤掉）。
+                    if (e.Data != null && e.Data.Trim().Length > 0) Log(root, "[out] " + e.Data);
                 };
+                // stderr 是崩溃信息的主通道（chromium 的 ERROR 行都往这走），一律保留
                 p.ErrorDataReceived += delegate(object s, DataReceivedEventArgs e)
                 {
                     if (e.Data != null) Log(root, "[err] " + e.Data);
@@ -375,6 +431,12 @@ namespace ShuyuanReader
             }
 
             p.WaitForExit();
+            if (redirect)
+            {
+                // WaitForExit()（无参）不等异步输出事件排空，加个超时版把残留的 stderr 收干净；
+                // 否则那一行 Chromium 报错常常还没写进日志就退出了。
+                p.WaitForExit(5000);
+            }
             int code = p.ExitCode;
 
             if (code != 0)
@@ -382,13 +444,38 @@ namespace ShuyuanReader
                 Log(root, "[launcher] 子进程退出码 " + code);
                 Fail("启动失败（退出码 " + code + "）。\r\n\r\n" +
                      "详细信息见日志：\r\n" + _logFile + "\r\n\r\n" +
-                     "也可以在终端里手动运行查看完整报错：\r\n" +
-                     "  cd /d " + root + "\r\n" +
-                     "  \"" + node + "\" scripts\\start.js");
+                     Suggest(root, node));
             }
             return code;
         }
 
+        /// <summary>
+        /// 失败时给出可操作的排查建议。
+        ///
+        /// 实测最常见的两种失败，日志里一眼能认出来：
+        ///   1) node 版本太老 —— 本包用了多个 Node 16+ 才有 API（fs.cpSync / fs.rmSync），
+        ///      老版本 node 会以 SyntaxError/TypeError 直接退出，启动器只能看到退出码。
+        ///   2) 首次启动要从程序目录复制约 270MB 的 electron 运行时（.electron-runtime\），
+        ///      磁盘空间不足或杀毒软件拦了复制，同样是非零退出。
+        /// 这两条与「让用户回车关掉一个纯文本窗口」相比，直接讲清楚更好。
+        /// </summary>
+        private static string Suggest(string root, string node)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.Append("如果看不懂上面的日志，多半是这两种情况：\r\n\r\n");
+            sb.Append("1) Node.js 版本太老。本机应使用随包的 runtime\\node\\node.exe：\r\n");
+            sb.Append("   " + node + "\r\n");
+            sb.Append("   可在终端里手动运行下面两行确认：\r\n");
+            sb.Append("     cd /d " + root + "\r\n");
+            sb.Append("     \"" + node + "\" -v\r\n");
+            sb.Append("   低于 v16.7 的话请删掉 runtime 目录重新解压整个包。\r\n\r\n");
+            sb.Append("2) 首次启动会复制约 270MB 运行时到 " + Path.Combine(root, ".electron-runtime") + "，\r\n");
+            sb.Append("   磁盘空间不足或杀毒软件拦截时也会失败。可先手动运行：\r\n");
+            sb.Append("     cd /d " + root + "\r\n");
+            sb.Append("     \"" + node + "\" scripts\\start.js\r\n");
+            sb.Append("   这条命令会把完整的报错打在窗口里，方便贴出来排查。");
+            return sb.ToString();
+        }
         private static int RunCli(string root, string node, List<string> args)
         {
             // WinExe 没有控制台：优先附加到调用者的终端，否则新建一个
@@ -433,7 +520,10 @@ namespace ShuyuanReader
             {
                 if (_logFile == null)
                 {
-                    string dir = Path.Combine(root, "data");
+                    // 散包把数据目录指到用户目录时，日志也跟着过去（否则程序目录只读就写不了日志，
+                    // 用户按提示去找 %USERPROFILE%\ShuyuanReader\data\launcher.log 会扑空）。
+                    string baseDir = string.IsNullOrEmpty(_dataDir) ? root : _dataDir;
+                    string dir = string.IsNullOrEmpty(_dataDir) ? Path.Combine(baseDir, "data") : baseDir;
                     Directory.CreateDirectory(dir);
                     _logFile = Path.Combine(dir, "launcher.log");
                     if (File.Exists(_logFile) && new FileInfo(_logFile).Length > LogMaxBytes)
@@ -454,8 +544,17 @@ namespace ShuyuanReader
             }
         }
 
+        /// <summary>
+        /// 弹窗报错。--cli 调用时只写日志不弹框：CLI 通常是在脚本/终端里跑，
+        /// 弹窗会卡住调用方（实测会让自动化测试挂在这里等回车）。
+        /// </summary>
         private static void Fail(string message)
         {
+            if (_runCli)
+            {
+                try { Log(_root ?? AppDomain.CurrentDomain.BaseDirectory, "[launcher] " + message.Replace("\r\n", " | ")); } catch (Exception) { }
+                return;
+            }
             MessageBoxW(IntPtr.Zero, message, AppTitle + " — 启动失败", 0x00000010 /* MB_ICONERROR */);
         }
     }

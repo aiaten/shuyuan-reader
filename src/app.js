@@ -22,8 +22,10 @@ const { exportTxt, exportLibrary, normalizeOptions, DEFAULTS } = require('./expo
 
 /** 数据根目录：环境变量 SHUYUAN_DATA > <项目根>/data */
 function resolveDataDir(explicit) {
-  if (explicit) return path.resolve(explicit);
-  if (process.env.SHUYUAN_DATA) return path.resolve(process.env.SHUYUAN_DATA);
+  const picked = explicit || process.env.SHUYUAN_DATA;
+  // 空串 / 纯空白当作「没指定」：Electron 的 process.env.XXX 在变量不存在时是 undefined，
+  // 但启动器拼参数时可能给出空值，path.resolve('') 会变成 cwd，把数据写到莫名其妙的地方。
+  if (typeof picked === 'string' && picked.trim()) return path.resolve(picked.trim());
   return path.join(__dirname, '..', 'data');
 }
 

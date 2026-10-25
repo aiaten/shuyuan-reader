@@ -567,6 +567,32 @@ async function cmdExport(app, { pos, flags }) {
   for (const f of r.files) console.log(`  ${fmtSize(f.bytes).padStart(9)}  ${f.path}`);
 }
 
+/**
+ * 首次使用（数据目录是新建的）时，把**散包内置**的 data/sources/{sources,rss}.json 灌进去。
+ *
+ * 为什么需要：绿色版把数据目录指到 %USERPROFILE%\ShuyuanReader\data，那里一开始是空的；
+ * 而包内 data/sources/*.json 带着 18 个书源（这是发出去就有书可搜的关键）。
+ * 只补「目标不存在」的文件，绝不覆盖用户自己的书源。
+ */
+function seedBundledData(dataDir) {
+  const bundled = path.join(__dirname, '..', 'data');
+  const files = [path.join('sources', 'sources.json'), path.join('sources', 'rss.json')];
+  let seeded = 0;
+  for (const rel of files) {
+    const from = path.join(bundled, rel);
+    const to = path.join(dataDir, rel);
+    try {
+      if (!fs.existsSync(from) || fs.existsSync(to)) continue;
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+      seeded++;
+    } catch (_) {
+      /* 灌不进去不影响启动，App 会自己建空文件 */
+    }
+  }
+  return seeded;
+}
+
 /* ---------------- 入口 ---------------- */
 
 async function main() {
@@ -578,6 +604,8 @@ async function main() {
     console.log(HELP);
     return 0;
   }
+
+  seedBundledData(flags.data || process.env.SHUYUAN_DATA || path.join(__dirname, '..', 'data'));
 
   const app = new App({
     dataDir: flags.data,

@@ -76,10 +76,35 @@ function store() {
   return browserStore;
 }
 
+/**
+ * 首次使用（数据目录是新建的）时，把包内 data/sources/{sources,rss}.json 灌进去。
+ * 绿色版的数据目录是 %USERPROFILE%\ShuyuanReader\data，一开始是空的，
+ * 不灌的话发出去的书源列表就是 0 个。只补不覆盖。
+ */
+function seedBundledData(dataDir) {
+  const bundled = path.join(__dirname, '..', 'data');
+  for (const rel of [path.join('sources', 'sources.json'), path.join('sources', 'rss.json')]) {
+    const from = path.join(bundled, rel);
+    const to = path.join(dataDir, rel);
+    try {
+      if (!fs.existsSync(from) || fs.existsSync(to)) continue;
+      fs.mkdirSync(path.dirname(to), { recursive: true });
+      fs.copyFileSync(from, to);
+    } catch (_) {
+      /* 灌不进去不影响启动 */
+    }
+  }
+}
+
 function getApp() {
   if (!facade) {
+    const dataDir = process.env.SHUYUAN_DATA || path.join(__dirname, '..', 'data');
+    seedBundledData(dataDir);
     facade = new App({
-      dataDir: process.env.SHUYUAN_DATA || undefined,
+      // 散包不把书架/正文放在程序目录里：程序可能被解压到权限受限的位置
+      // （Program Files），也可能整个被删掉，跟着更新解压覆盖还会丢数据。
+      // 启动器会用 .shuyuan-root 把数据目录指到 <用户主目录>\\ShuyuanReader 并注入这个变量。
+      dataDir,
       logger: (m) => console.log('[app]', m),
       // 下载队列每次任务快照变化都往界面推一次（界面的「下载」页签据此刷新进度）
       onDownloadEvent: (ev) => {

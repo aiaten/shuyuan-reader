@@ -94,6 +94,36 @@ node test/run.js           # 测试（unit + net）
 node test/run.js --all     # 全部测试
 ```
 
+### 打包成绿色版（发给别人测试）
+
+```bash
+node tools/build-launcher.js --no-link   # 先编译启动器书源阅读器.exe（改过 Program.cs 才需要）
+node tools/build-dist.js                 # 生成 dist/书源阅读器-<版本>-win64.zip
+node tools/build-dist.js --keep          # 同上，但保留解压后的暂存目录便于本地验证
+```
+
+分发包是**免安装**的：里面自带 `runtime\node\node.exe`、展开成扁平 npm 布局的 `node_modules`
+（只含 cheerio / iconv-lite 及其依赖，不含 electron 与 @types），以及一份只有书源、没有个人书架的 `data\`。
+对方双击 `书源阅读器.exe` 即可，不需要装 Node.js。
+
+几个必须知道的设计点：
+
+- **electron 以「未展开」的形式进包**（启动器无法自动下载，缺了它对方一定启动失败 —— v0.2.10 第一次发包就栽在这）。
+  包里只有 `node_modules\electron\{package.json, version, dist\}`，dist 里 exe / dll / pak / icudtl.dat 原样带上；
+  `--no-electron` 可省略这一步（仅本机调试用：省了只剩 45MB，但对方机器跑不起来）。
+  首次启动时 `scripts/start.js` 用 `resolveElectronExe({ cacheRoot, forceCopy: true })` 把整份 dist 复制到
+  纯 ASCII 路径再启动（`forceCopy` 是必须的：用户可能解压到桌面等含中文的路径）。
+  分发包通过 `scripts/start.js` 里的 `SHUYUAN_ELECTRON_CACHE` 把这份副本放在程序目录的
+  `.electron-runtime\`，卸载删文件夹即可，不在用户主目录留残留。开发环境仍用 `<用户主目录>\.shuyuan-reader`。
+- **数据目录重定向**：包里带一个边车文件 `.shuyuan-root`，内容是 `%USERPROFILE%\ShuyuanReader`。
+  启动器（`tools/launcher/Program.cs` 的 `FindProjectRoot`）支持环境变量展开，于是书架/下载/进度都落在
+  用户目录，升级或重装程序不会丢数据。
+- **依赖扁平化必须按版本号取最高**：pnpm 下同名包有多份（entities 有 4.2.0 / 6.0.0 / 7.0.1），扁平布局只能留一份。
+  早期实现「先到先得」，留下了 entities@4.2.0，而 htmlparser2@10 要 `require('entities/decode')`，
+  运行直接 `ERR_PACKAGE_PATH_NOT_EXPORTED`。现在 `collectPackages` / `expandDependencies` 都按 semver 比高。
+- **按 package.json 的 files 字段挑文件**，且 glob 必须支持 `lib/**/*` 这种跨级写法
+  （手写按段匹配 `toRegExp`）；用后缀黑名单筛依赖文件会把 `entities` / `domutils` 的运行时文件筛掉。
+
 ### CLI 速览
 
 ```
