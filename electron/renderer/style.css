@@ -248,6 +248,7 @@ main { height: calc(100% - 52px); position: relative; }
 .btn.danger { color: var(--err); border-color: var(--danger-border); }
 .btn.danger:hover { background: var(--danger-bg); }
 .btn:disabled { opacity: .5; cursor: not-allowed; }
+.btn.hidden { display: none; }
 
 .input {
   border: 1px solid var(--line);
@@ -290,6 +291,11 @@ label.check { display: inline-flex; align-items: center; gap: 5px; font-size: 13
 .card.rejected .card-title { color: var(--err); }
 .card.rejected .card-sub { color: var(--rejected-sub); }
 .card.rejected .card-sub .hint { color: var(--err); }
+
+/* 从在线书源跳去网站再切回来时，滚回的那张卡片闪一下，好认 */
+.card.flash { border-color: var(--primary); box-shadow: 0 0 0 2px var(--primary); }
+@keyframes online-flash { from { background: var(--hover-bg); } to { background: transparent; } }
+.card.flash { animation: online-flash .8s ease-out; }
 
 .badge {
   display: inline-block;

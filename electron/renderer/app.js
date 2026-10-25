@@ -301,14 +301,54 @@ const loaders = {
   downloads: () => refreshDownloads(false),
   sources: loadSources,
   online: () => { loadOnline(); loadRoute(false); },
+  // 切回「在线书源」：以前这里每次都整页重建、滚回顶部，从网站跳回来就找不到原来那本了。
+  // 现在先按存下的位置还原（筛选条件 + 页码 + 滚回那张卡），超过 ONLINE_STALE_MS 没拉过就顺手刷新一次。
+  onlineRestore: async () => {
+    const pos = readOnlinePosition();
+    if (!pos) {
+      await loadOnline();
+      loadRoute(false);
+      return;
+    }
+    if (pos.keys !== undefined) {
+      $('#onlineKeys').value = pos.keys || '';
+      $('#onlineOrder').value = pos.order1 || 'time';
+    }
+    onlinePage = pos.page || 1;
+    if (!onlineLoadedAt || onlineStale(ONLINE_STALE_MS)) {
+      onlineFocusName = pos.focus || '';
+      await loadOnline();
+      onlineFocusName = '';
+      await restoreOnlinePosition(pos);
+    } else {
+      await restoreOnlinePosition(pos);
+    }
+    loadRoute(false);
+  },
   browser: loadBrowser,
 };
 
+/** 当前页签（用于判断是不是「从别处切回在线页」） */
+let currentView = 'shelf';
+
 function switchView(name, opts = {}) {
+  // 离开「在线书源」时把浏览位置存下来：点开网站→切到浏览器页签→切回来，
+  // 列表会整页重建并滚回顶部，看着就像被重置了。存好位置回来就能原地接上。
+  if (currentView === 'online' && name !== 'online') {
+    try {
+      saveOnlinePosition();
+    } catch (_) {
+      /* 存位置失败不影响切换 */
+    }
+  }
+  const backToOnline = name === 'online' && currentView !== 'online';
+  currentView = name;
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   // skipLoad：调用方自己负责加载（启动时先 await loadShelf 再自动检查更新，避免重复读盘）
-  if (loaders[name] && !opts.skipLoad) loaders[name]();
+  if (!loaders[name] || opts.skipLoad) return;
+  if (backToOnline && loaders.onlineRestore) loaders.onlineRestore();
+  else loaders[name]();
 }
 
 $$('.tab').forEach((t) => (t.onclick = () => switchView(t.dataset.view)));
@@ -1866,6 +1906,96 @@ $('#btnAddSource').onclick = () => {
 let onlinePage = 1;
 let onlineTotal = 1;
 
+const ONLINE_POS_KEY = 'onlinePosition';
+/** 本次渲染出来的书源名（按显示顺序），用于按名字回定位 */
+let onlineSeen = [];
+/** 下次 loadOnline 要滚到的书源名（空串 = 不定位） */
+let onlineFocusName = '';
+/** 下次 loadOnline 要恢复的像素位置（null = 不恢复） */
+let onlineRestoreTop = null;
+/** 上次成功拉取列表的时间（0 = 从没拉过）；页签上显示刷新时刻，也用于判断重进要不要重新拉 */
+let onlineLoadedAt = 0;
+/** 从别的页签切回在线页时，距上次拉取超过这个时间就重新拉一遍（毫秒） */
+const ONLINE_STALE_MS = 30 * 1000;
+
+/** 在线书源列表的滚动容器（overflow-y:auto 的就是 #onlineList 本身） */
+function onlineScroller() {
+  return $('#onlineList');
+}
+
+function onlineQuery() {
+  return { keys: $('#onlineKeys').value.trim(), order1: $('#onlineOrder').value };
+}
+
+/** 上次拉取距今是否已经超过 ms（页签重进时判断要不要重新拉） */
+function onlineStale(ms) {
+  return !onlineLoadedAt || Date.now() - onlineLoadedAt > ms;
+}
+
+/** 记录刷新时间并回显到列表工具栏 */
+function stampOnlineLoaded() {
+  onlineLoadedAt = Date.now();
+  const el = $('#onlineLoadedAt');
+  if (el) el.textContent = fmtCheckTime(onlineLoadedAt) + ' 刷新';
+}
+
+/** 把当前位置（筛选条件 + 页码 + 滚动 + 当前书源名）存到 localStorage */
+function saveOnlinePosition(extra = {}) {
+  const box = onlineScroller();
+  const top = box ? box.scrollTop : 0;
+  const pos = Object.assign({ at: Date.now() }, onlineQuery(), { page: onlinePage, scrollTop: top, names: onlineSeen.slice() }, extra);
+  try {
+    window.localStorage.setItem(ONLINE_POS_KEY, JSON.stringify(pos));
+  } catch (_) {
+    /* 存不下就算了，不影响浏览 */
+  }
+  return pos;
+}
+
+function readOnlinePosition() {
+  try {
+    const raw = window.localStorage.getItem(ONLINE_POS_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+/** 滚到某张卡片并高亮一下，告诉用户「就是这本」 */
+function scrollToListCard(el) {
+  if (!el) return;
+  try {
+    el.scrollIntoView({ block: 'center' });
+  } catch (_) {
+    el.scrollIntoView();
+  }
+  el.classList.add('flash');
+  setTimeout(() => el.classList.remove('flash'), 1600);
+}
+
+function findListCardByName(name) {
+  if (!name) return null;
+  const box = onlineScroller();
+  if (!box) return null;
+  for (const c of box.querySelectorAll('.card')) {
+    const t = c.querySelector('.card-title');
+    if (t && t.textContent.trim() === name) return c;
+  }
+  return null;
+}
+
+/** 按存下的位置还原：先按书源名定位（换页也准），不行再按像素 */
+async function restoreOnlinePosition(pos) {
+  if (!pos) return;
+  const card = findListCardByName(pos.focus);
+  if (card) {
+    scrollToListCard(card);
+    return;
+  }
+  const box = onlineScroller();
+  if (box && pos.scrollTop) box.scrollTop = pos.scrollTop;
+}
+
 async function loadOnline() {
   const keys = $('#onlineKeys').value.trim();
   const order = $('#onlineOrder').value;
@@ -1877,16 +2007,20 @@ async function loadOnline() {
     return;
   }
   onlineTotal = r.totalPages || 1;
+  onlineTotal = r.totalPages || 1;
   $('#onlinePage').textContent = `${r.page} / ${onlineTotal}`;
   box.innerHTML = '';
+  onlineSeen = [];
   if (!r.items.length) {
     box.innerHTML = '<p class="empty">没有匹配的书源</p>';
+    stampOnlineLoaded();
     return;
   }
   // 探测状态表：把「探测过且不允许添加」的书源标红（key = bookSourceUrl 归一）
   const probeMap = await window.api.probeStatus().catch(() => ({}));
   const keyOfUrl = (u) => String(u || '').trim().replace(/\/+$/, '').toLowerCase();
   for (const it of r.items) {
+    onlineSeen.push(it.name);
     const el = document.createElement('div');
     const rejected = probeMap[keyOfUrl(it.url)];
     el.className = 'card' + (rejected && rejected.allowed === false ? ' rejected' : '');
@@ -1914,7 +2048,11 @@ async function loadOnline() {
         <button class="btn" data-act="open" title="在内置浏览器里打开这个书源对应的网站">🌐 打开网站</button>
         <button class="btn" data-act="view">查看 JSON</button>
       </div>`;
-    el.querySelector('[data-act=open]').onclick = () => openSourceSite(it.url, it.name);
+    // 「打开网站」前先把位置记下来：从网站切回来才知道刚才翻到哪一本
+    el.querySelector('[data-act=open]').onclick = () => {
+      saveOnlinePosition({ focus: it.name });
+      openSourceSite(it.url, it.name);
+    };
     el.querySelector('[data-act=view]').onclick = async () => {
       const list = await run('下载 JSON…', () => window.api.onlineGet(it.id));
       if (!list) return;
@@ -1953,8 +2091,25 @@ async function loadOnline() {
       }
       fillSourceSelect();
     };
+    // 鼠标按下就记住位置（手机/触屏也能用），不用等点了哪个按钮
+    el.addEventListener('mousedown', () => saveOnlinePosition({ focus: it.name }));
     box.appendChild(el);
   }
+  // 卡片都插好了再恢复位置：优先按书源名定位（换页也不会错），其次按像素
+  const sb = onlineScroller();
+  if (sb) {
+    if (onlineFocusName) {
+      const c = findListCardByName(onlineFocusName);
+      onlineFocusName = '';
+      if (c) scrollToListCard(c);
+    }
+    if (onlineRestoreTop != null) {
+      sb.scrollTop = onlineRestoreTop;
+      onlineRestoreTop = null;
+    }
+  }
+  updateOnlineBackButton();
+  stampOnlineLoaded();
 }
 
 $('#btnOnlineSearch').onclick = () => {
@@ -1980,6 +2135,38 @@ $('#btnOnlineNext').onclick = () => {
   if (onlinePage >= onlineTotal) return;
   onlinePage++;
   loadOnline();
+};
+
+/* 回到上次翻到的位置：从在线书源点开网站、看完再切回来时用 */
+function updateOnlineBackButton() {
+  const btn = $('#btnOnlineBack');
+  if (!btn) return;
+  const pos = readOnlinePosition();
+  const has = !!(pos && pos.focus);
+  btn.classList.toggle('hidden', !has);
+  if (has) btn.title = '回到上次打开的「' + pos.focus + '」';
+}
+
+$('#btnOnlineBack').onclick = async () => {
+  const pos = readOnlinePosition();
+  if (!pos) return;
+  if (pos.keys !== undefined) {
+    $('#onlineKeys').value = pos.keys || '';
+    $('#onlineOrder').value = pos.order1 || 'time';
+  }
+  onlinePage = pos.page || 1;
+  onlineFocusName = pos.focus || '';
+  await loadOnline();
+  updateOnlineBackButton();
+  if (pos.focus) toast('已回到「' + pos.focus + '」', 'ok');
+};
+
+/** 刷新当前列表（不翻页）：保留筛选条件，重新拉一遍数据并接回原来的滚动位置 */
+$('#btnOnlineReload').onclick = async () => {
+  const box = onlineScroller();
+  onlineRestoreTop = box ? box.scrollTop : 0;
+  await loadOnline();
+  toast('列表已刷新', 'ok');
 };
 
 /* ==================== 在线「更新 / 校验 / 订阅源」（m04402） ==================== */
