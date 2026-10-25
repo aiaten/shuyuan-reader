@@ -54,7 +54,7 @@ contextBridge.exposeInMainWorld('api', {
 
   /* 搜索 */
   searchOne: (key, kw, page) => call('search:one', key, kw, page),
-  searchAll: (kw, keys, page) => call('search:all', kw, keys, page),
+  searchAll: (kw, keys, page, opts) => call('search:all', kw, keys, page, opts),
   /** 全书源聚合搜索（并发 + 增量 + 熔断）；onEvent 收到每个源的进度 */
   searchEverywhere: (kw, opts) => call('search:everywhere', kw, opts),
   sourcePerf: (key) => call('search:perf', key),
@@ -83,6 +83,10 @@ contextBridge.exposeInMainWorld('api', {
   enqueueDownload: (id, opts) => call('download:enqueue', id, opts),
   listDownloads: () => call('download:list'),
   cancelDownload: (jobId) => call('download:cancel', jobId),
+  /** 暂停（停止但保留任务，之后可「继续」断点续传） */
+  pauseDownload: (jobId) => call('download:pause', jobId),
+  /** 继续一条停下的任务（原地续传，已下载的章会跳过） */
+  resumeDownload: (jobId) => call('download:resume', jobId),
   clearFinishedDownloads: () => call('download:clear'),
   /** 订阅下载任务变化（返回取消订阅函数） */
   onDownloadEvent: (cb) => {

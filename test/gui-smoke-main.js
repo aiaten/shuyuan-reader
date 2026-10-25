@@ -107,6 +107,7 @@ const PROBE = `(async () => {
   const __watch = (ms) => new Promise((res) => setTimeout(() => res({ __timeout: true }), ms));
   const __body = async () => {
 
+  const __step = (n) => { try { console.log('[STEP] ' + n + ' t=' + (Date.now() - __t0) + 'ms'); } catch(_) {} };
   console.log('[PROBE] start');
   // 各段落耗时：整体必须压在 MAX_MS（120s）以内，超时会让整个冒烟「没有结果文件」。
   // 出问题时先看这里的分布，别靠猜。
@@ -185,13 +186,17 @@ const PROBE = `(async () => {
           hasBadge: !!rejCards[0].querySelector('.badge.err'),
         }
       : null;
+    __step('before-probeStatus');
     const psm = await window.api.probeStatus();
+    __step('after-probeStatus');
     const normSlash = (u) => (u.endsWith('/') ? u.slice(0, -1) : u); // PROBE 模板串内禁用反斜杠转义
     const ukey0 = zzz ? normSlash(String(zzz.url).trim()).toLowerCase() : '';
     r.func.probeStatusHasRejected = !!(zzz && psm && psm[ukey0] && psm[ukey0].allowed === false);
 
     // 1) 结构非法 + 域名不存在的书源，必须被拒绝且不落盘
+    __step('before-sourceList');
     const before = (await window.api.sourceList()).length;
+    __step('after-sourceList');
     const bad1 = await window.api.sourceAdd({ bookSourceName: 'GUI坏源-结构', bookSourceUrl: 'not-a-url' }, {});
     r.func.badShapeRejected = bad1 && bad1.added === false;
     r.func.badShapeReason = (bad1 && bad1.reason) || '';
@@ -234,7 +239,9 @@ const PROBE = `(async () => {
       ruleContent: { content: '.info_dv1@p[1:-2]@text', nextContentUrl: 'text.下一页@href' },
       ruleExplore: [],
     };
+    __step('before-sourceAdd-good');
     const addRes = await window.api.sourceAdd(good, { keyword: '诡秘之主' });
+    __step('after-sourceAdd-good');
     r.func.goodAdded = !!(addRes && addRes.added);
     r.func.goodReason = (addRes && addRes.reason) || '';
     r.func.goodScore = addRes && addRes.probe ? addRes.probe.score : null;
@@ -249,23 +256,31 @@ const PROBE = `(async () => {
 
     // ---- 功能性检查：搜索 →加书构→下载 →导出 TXT（交付点 ②④）---
     // 注意签名：addToShelf(key, book, opts) / download(id, opts) / exportBook(id, opts)
+    __step('before-searchAll');
     const groups = await window.api.searchAll('诡秘之主', null, 1);
+    __step('after-searchAll');
     const g0 = (groups || []).find((g) => g.ok && g.list && g.list.length);
     r.func.searchCount = g0 ? g0.list.length : 0;
     if (g0) {
       const book = g0.list[0];
       r.func.searchFirst = book.name;
+      __step('before-addToShelf');
       const added = await window.api.addToShelf(g0.sourceKey, book, { download: false });
+      __step('after-addToShelf');
       r.func.shelfAddOk = !!(added && added.id);
       r.func.shelfChapterCount = added && added.chapterCount;
       const bid = added && added.id;
       r.func.shelfBookId = bid;
       if (bid) {
         // 只下 2 章，够验证导出即可
+        __step('before-download');
         const dl = await window.api.download(bid, { from: 0, to: 1 });
+        __step('after-download');
         r.func.dlDone = dl && dl.done;
         r.func.dlFailed = dl && dl.failed;
+        __step('before-exportBook');
         const exp = await window.api.exportBook(bid, { layout: 'single', encoding: 'utf-8' });
+        __step('after-exportBook');
         r.func.exportOk = !!(exp && (exp.files || []).length);
         r.func.exportBytes = exp && exp.files && exp.files[0] ? exp.files[0].bytes : null;
         r.func.exportPath = exp && exp.files && exp.files[0] ? exp.files[0].path : null;
@@ -318,7 +333,9 @@ const PROBE = `(async () => {
 
     // ---- 懒加载滑动窗口（m07558）----
         // 1) 加书架时只下前 10 章（而不是全书）
+        __step('before-addToShelf2');
         const added2 = await window.api.addToShelf(g0.sourceKey, book, { download: true });
+        __step('after-addToShelf2');
         const w0 = added2 && added2.download;
         r.func.winInitialFrom = w0 && w0.from;
         r.func.winInitialTo = w0 && w0.to;
@@ -328,14 +345,20 @@ const PROBE = `(async () => {
         // 本轮之前已下这 0-1 章 → 窗口应「只补缺的」，而不是重下
         r.func.winCovered = (w0 ? w0.done + w0.skipped : 0);
         // 2) 读到第3 章→应补第4..13 章（不吃已读的第 3 章）
+        __step('before-w1');
         const w1 = await window.api.downloadWindow(bid, 3, {});
+        __step('after-w1');
         r.func.winReadFrom = w1 && w1.from;
         r.func.winReadTo = w1 && w1.to;
         // 3) 同一位置再调 →全已下载，应报告 empty
+        __step('before-w2');
         const w2 = await window.api.downloadWindow(bid, 3, {});
+        __step('after-w2');
         r.func.winRepeatEmpty = !!(w2 && (w2.empty || w2.skipped));
         // 4) busy 状态查询可用（完成态应为 false）
+        __step('before-windowBusy');
         const busy = await window.api.windowBusy(bid);
+        __step('after-windowBusy');
         r.func.winBusyAfter = !!(busy && busy.busy);
       }
     }
@@ -347,27 +370,39 @@ const PROBE = `(async () => {
       r.func[sel] = !!(b && typeof b.onclick === 'function');
     }
     // 2) 校验书源：只校验刚加的 GUI 自写源（zuizhong.net，关键词「剑」可命中）
+    __step('before-sourceCheck');
     const chk = await window.api.sourceCheck({ keys: ['https://www.zuizhong.net'], keyword: '剑' });
+    __step('after-sourceCheck');
     r.func.check = {
       total: chk && chk.total,
       passed: chk && chk.passed,
       first: chk && chk.results && chk.results[0] ? { name: chk.results[0].name, ok: chk.results[0].ok } : null,
     };
     // 3) 更新： 天窗可+ 免探测（快速冒烟；真网可能有0~N 条新源）
+    __step('before-onlineSyncUpdates');
     const sync = await window.api.onlineSyncUpdates({ days: 1, pages: 1, probe: false });
+    __step('after-onlineSyncUpdates');
     r.func.sync = {
       checked: sync && sync.checked,
       items: sync && sync.items ? sync.items.length : -1,
       added: sync && sync.added,
     };
     // 4) 订阅源：在线列表 →安装 193 →文本导入 →本地列表 →清理
+    __step('before-rssOnlineList');
     const rssOn = await window.api.rssOnlineList({ page: 1 });
+    __step('after-rssOnlineList');
     r.func.rssOnline = { count: rssOn && rssOn.items ? rssOn.items.length : 0, first: rssOn && rssOn.items && rssOn.items[0] ? rssOn.items[0].name : '' };
+    __step('before-rssInstall');
     const rssInst = await window.api.rssInstall(193, {});
+    __step('after-rssInstall');
     r.func.rssInstall = { added: rssInst && rssInst.added, name: rssInst && rssInst.items && rssInst.items[0] ? rssInst.items[0].name : '' };
+    __step('before-rssImportText');
     const rssImp = await window.api.rssImportText('[{"sourceName":"烟测订阅","sourceUrl":"https://example.com/rss"}]', {});
+    __step('after-rssImportText');
     r.func.rssImportAdded = rssImp && rssImp.added;
+    __step('before-rssList');
     const rssLocal = await window.api.rssList();
+    __step('after-rssList');
     r.func.rssLocalCount = rssLocal.length;
     r.func.rssRemove1 = await window.api.rssRemove('https://example.com/rss');
     r.func.rssRemove2 = await window.api.rssRemove('http://yckceo.vip');
@@ -375,7 +410,9 @@ const PROBE = `(async () => {
 
     // ---- m06856 三功能：备用线路 / 全书源搜索/ 提选----
     // 1) 线路：不联网只读当前 activeBase，必须报出主站与备用站候选
+    __step('before-onlineRoute');
     const rt = await window.api.onlineRoute({});
+    __step('after-onlineRoute');
     r.func.route = {
       shuyuan: rt && rt.shuyuan,
       rss: rt && rt.rss,
@@ -388,6 +425,7 @@ const PROBE = `(async () => {
     // 2) 线路强制重探：真网，必须命中 yck 家族域名之一
     // 真网重探：站点偶发不响应时 yck.list 可能长时间挂着（实测会超过 MAX_MS）。
     // 这里给它一个硬上限，超时按「本次没探出来」记，不让整个冒烟变成「没有结果文件」。
+    __step("before-onlineRoute-retry");
     const rtRetry = await Promise.race([
       window.api.onlineRoute({ retry: true, check: true }),
       new Promise((res) => setTimeout(() => res({ ok: false, checked: false, error: "route-retry-timeout" }), 45000)),
@@ -401,6 +439,7 @@ const PROBE = `(async () => {
     };
     // 3) 全书源搜索：模式选择器+ 按钮 + 流式事件 + 聚合结果
     //    （没有独立的「全书源」按钮：由#searchMode 的all/one 决定资searchEverywhere 还是 searchOne，
+    __step("after-onlineRoute-retry");
     const ewMode = document.querySelector('#searchMode');
     const ewBtn = document.querySelector('#btnSearch');
     r.func.ewBtnExists = !!(ewMode && ewBtn);
@@ -409,12 +448,14 @@ const PROBE = `(async () => {
     const ewEvents = [];
     const ewOff = window.api.onSearchEvent((ev) => ewEvents.push({ type: ev.type, ok: !!ev.ok, count: ev.count || 0 }));
     const t0 = Date.now();
+    __step("before-searchEverywhere");
     const ew = await Promise.race([
       window.api.searchEverywhere('诡秘之主', {
         page: 1, concurrency: 6, perSourceTimeout: 8000, totalTimeout: 20000,
       }),
       new Promise((res) => setTimeout(() => res({ ok: false, total: 0, groups: [], sources: [], elapsed: 60000 }), 60000)),
     ]);
+    __step("after-searchEverywhere");
     const ewElapsed = Date.now() - t0;
     if (ewOff) ewOff();
     const ewG0 = ew && ew.groups && ew.groups[0];
@@ -440,11 +481,14 @@ const PROBE = `(async () => {
     r.func.ewSumSrcMs = sumSrc;
     // 4) 本地书架搜索提速：searchAll 单次计时（并验证短缓存）
     const t1 = Date.now();
+    __step('before-searchAll2');
     const sa = await window.api.searchAll('诡秘之主', null, 1);
+    __step('after-searchAll2');
     r.func.saElapsed = Date.now() - t1;
     r.func.saGroups = (sa || []).length;
     r.func.saOk = (sa || []).filter((g) => g.ok).length;
 
+    __step('before-layout');
     // ---- m09109 需求①：书架查看方式（列表 / 图标） ----
     // 整块 try/catch：这是纯界面断言，任何一步抛错都不该把后面所有用例一起带走
     // （历史上出现过一处异常导致 76 项连锁失败，极难定位）。
@@ -502,6 +546,7 @@ const PROBE = `(async () => {
       r.func.layout = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.layout || {});
     }
 
+    __step('before-reading');
     // ---- m09109 需求②：阅读设置（字体样式 / 字号） ----
     try {
       const btn = document.querySelector('#btnReaderSettings');
@@ -641,6 +686,7 @@ const PROBE = `(async () => {
       r.func.rd = Object.assign({ err: String(e.message).slice(0, 160) }, r.func.rd || {});
     }
 
+    __step('before-browser');
     // ---- m09109 需求③：内置浏览器页 ----
     // 回归点：<webview> 不带 src 时永不初始化 guest（点站点无反应）；
     // 且反复切到该页签不得重复建 guest（loadBrowser 只能初始化一次）。
@@ -970,6 +1016,7 @@ app.whenReady().then(async () => {
   const consoleErrors = [];
   win.webContents.on('console-message', (_e, level, message) => {
     consoleErrors.push(`[L${level}] ` + message);
+    try { fs.appendFileSync(path.join(os.tmpdir(), '_gui_trace.log'), '[' + level + '] ' + message + String.fromCharCode(10)); } catch (_) {}
   });
   win.webContents.on('render-process-gone', (_e, details) => {
     consoleErrors.push('[render-process-gone] ' + JSON.stringify(details));

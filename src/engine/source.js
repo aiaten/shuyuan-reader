@@ -25,6 +25,16 @@ const H = require('../util/htmlformat');
  */
 const MAX_ROUNDS = 64;
 
+/**
+ * 预取-重跑循环的**时间**上限（毫秒）。
+ *
+ * 只用轮数约束不够：每轮取回都是有网络延迟的，一个「每轮都重新发同一个慢请求」
+ * 的源会按 `MAX_ROUNDS × 单轮耗时` 累加（实测哔咔漫画单轮 21s × 64 轮 ≈ 22 分钟），
+ * 而调用方（IPC / 界面）只看到「一直没返回」。所以再压一条墙上时钟上限：
+ * 到点就带着已缓存的结果收工，不再重跑。
+ */
+const DEFAULT_ROUND_BUDGET_MS = 20000;
+
 /* ------------------------------------------------------------------ *
  * 请求头解析
  * ------------------------------------------------------------------ */
@@ -344,6 +354,13 @@ class SourceEngine {
     const { prefetcher, rt } = this._makeRuntime(vars);
     rt.resetDiagnostics();
     const maxRounds = Math.max(1, this.httpOptions.maxRounds || MAX_ROUNDS);
+    // 墙上时钟预算：轮数上限之外的第二道闸（见 DEFAULT_ROUND_BUDGET_MS 的注释）
+    const budgetMs = Number.isFinite(this.httpOptions.roundBudgetMs) && this.httpOptions.roundBudgetMs > 0
+      ? this.httpOptions.roundBudgetMs
+      : DEFAULT_ROUND_BUDGET_MS;
+    const startedAt = Date.now();
+    /** 上一轮尝试过的 URL key 集合，用于识别「同一个请求反复失败」的停滞态 */
+    let prevKeys = null;
 
     for (let round = 0; round < maxRounds; round++) {
       prefetcher.clearMisses();
@@ -362,6 +379,28 @@ class SourceEngine {
         return out;
       }
 
+      // 停滞检测：如果这一轮要取的 miss 与上一轮完全相同，说明规则没有推进
+      // （典型：`java.ajax` 拿到的响应里还要再 ajax 一次，但那个请求每轮都 miss，
+      //  或者规则拿到的空串又被原样拿去构造了同一个 URL）。再跑下去只是烧网络。
+      // 这种情况不抛错——已经拿到的缓存足以让调用方拿到「尽量完整」的结果；
+      // 只在 diagnostics 里留痕，避免界面出现无解的错误弹窗。
+      const curKeys = new Set(Array.from(prefetcher.misses.keys()));
+      let stalled = false;
+      if (prevKeys && curKeys.size === prevKeys.size) {
+        stalled = true;
+        for (const k of curKeys) { if (!prevKeys.has(k)) { stalled = false; break; } }
+      }
+      prevKeys = curKeys;
+      if (stalled) {
+        const sample = Array.from(curKeys)[0] || '';
+        this.lastDiagnostics = rt.getDiagnostics();
+        this.lastDiagnostics.errors.push(
+          `预取停滞在第 ${round + 1} 轮：同一批请求反复未命中（${curKeys.size} 个，例：${String(sample).slice(0, 120)}）`
+        );
+        if (threw) throw threw;
+        return out;
+      }
+
       // 按登记顺序【串行】取回所有 miss。
       //
       // 这里必须串行，不能 Promise.all：Legado 的 `java.ajax` 在 Rhino 里是同步阻塞的，
@@ -374,12 +413,27 @@ class SourceEngine {
       for (const m of misses) {
         const o = m.options || {};
         const url = String(m.url);
+        // 到点就收工：已缓存的请求仍然可用，剩余 miss 留给下一轮（调用方通常有
+        // 自己的超时，返回半成品比返回「永不返回」好）。
+        const usedMs = Date.now() - startedAt;
+        if (usedMs >= budgetMs) {
+          this.lastDiagnostics = rt.getDiagnostics();
+          this.lastDiagnostics.errors.push(
+            `预取超时：第 ${round + 1} 轮已用 ${usedMs}ms（预算 ${budgetMs}ms）放弃剩余 ${misses.length} 个请求`
+          );
+          if (threw) throw threw;
+          return out;
+        }
+        // 单请求超时不得超过预算剩余时间，否则一个慢请求就能吃掉整条预算
+        const remainBudget = budgetMs - usedMs;
+        const reqTimeout = Math.max(1000, Math.min(remainBudget, this.httpOptions.timeout || 25000));
         try {
           const r = await this._fetch(url, {
             method: o.method || 'GET',
             body: o.body == null ? null : o.body,
             headers: o.headers || {},
             charset: o.charset || undefined,
+            timeout: reqTimeout,
           });
           prefetcher.cache.set(m.key, { status: r.status, text: r.text, url: r.url });
         } catch (e) {
@@ -389,7 +443,7 @@ class SourceEngine {
     }
 
     this.lastDiagnostics = rt.getDiagnostics();
-    throw new Error(`规则预取超过 ${maxRounds} 轮仍未收敛（可能存在链式 java.ajax）`);
+    throw new Error(`规则预取超过 ${maxRounds} 轮仍未收敛（可能存在链式 java.ajax，已用 ${Date.now() - startedAt}ms）`);
   }
 
   /* ---------------- 搜索 ---------------- */

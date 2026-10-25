@@ -36,6 +36,7 @@ const STATUS = {
   error: 'error',
   canceled: 'canceled',
   interrupted: 'interrupted',
+  paused: 'paused',
 };
 
 function readJSON(file, fallback) {
@@ -86,9 +87,12 @@ class DownloadQueue {
       // 进程重启后，排队/运行中的任务都已经不存在了 → 如实标记为已中断
       if (job.status === STATUS.queued || job.status === STATUS.running) {
         job.status = STATUS.interrupted;
-        job.error = '软件已重启，任务中断（已下载的章节会保留，重新点下载可续传）';
+        job.error = '软件已重启，任务中断（已下载的章节会保留，点「继续」可接着下）';
         job.finishedAt = job.finishedAt || Date.now();
       }
+      // 暂停是用户主动停的：重启后原样保留，界面仍然给「继续」
+      job.pauseRequested = false;
+      job.cancelRequested = false;
       this.jobs.push(job);
       this.seq = Math.max(this.seq, Number(job.seq) || 0);
     }
@@ -122,7 +126,7 @@ class DownloadQueue {
 
   /** 概览：有多少在排队 / 在跑 / 最近失败，供标签角标用 */
   summary() {
-    const s = { queued: 0, running: 0, done: 0, error: 0, canceled: 0, interrupted: 0, active: 0 };
+    const s = { queued: 0, running: 0, done: 0, error: 0, canceled: 0, interrupted: 0, paused: 0, active: 0 };
     for (const j of this.jobs) {
       if (s[j.status] != null) s[j.status]++;
       if (j.status === STATUS.queued || j.status === STATUS.running) s.active++;
@@ -215,11 +219,83 @@ class DownloadQueue {
       setImmediate(() => this._pump());
     } else if (j.status === STATUS.running) {
       j.cancelRequested = true;
+      j.pauseRequested = false;
       this._emit(j);
     }
     return this._snapshot(j);
   }
 
+  /**
+   * 中途停下但**保留任务**：排队中的直接撤下；运行中的打停止标记。
+   *
+   * 与 `cancel()` 的区别只在收尾状态：cancel 收尾成 `canceled`（终态，界面显示「取消」），
+   * 这里收尾成 `paused`（停住了但还能「继续」，进度/区间/失败章都留着）。
+   *
+   * 停止粒度是「章」：正在飞的那几章会让它跑完再收手，已下载的正文照常落盘，
+   * 所以「继续」时天然断点续传，不会从头再来。
+   */
+  pause(jobId) {
+    const j = this.jobs.find((x) => x.id === jobId);
+    if (!j) throw new Error('没有这个下载任务：' + jobId);
+    if (j.status === STATUS.running) {
+      // running → 打标记，由 _run 在 downloader 返回后收尾成 paused
+      j.pauseRequested = true;
+      j.updatedAt = Date.now();
+      this._persist();
+      this._emit(j);
+      return this._snapshot(j);
+    }
+    if (j.status === STATUS.queued) {
+      // 还没开跑：直接停在这里（保留已下进度，之后可以继续）
+      j.status = STATUS.paused;
+      j.error = '已暂停（继续会接着下）';
+      j.finishedAt = Date.now();
+      j.updatedAt = Date.now();
+      this._persist();
+      this._emit(j);
+      setImmediate(() => this._pump());
+      return this._snapshot(j);
+    }
+    // 终态任务：先「重下」再重开一条？不：这里保持原样返回，交给界面判断
+    return this._snapshot(j);
+  }
+
+  /**
+   * 继续一条停下的任务（paused / canceled / interrupted / error 都可以）。
+   *
+   * 实现要点：在**原任务上**把状态推回 queued，而不是新开一条——这样进度、
+   * 区间、失败章都留在一条记录里，界面也不会出现「一本两行」。
+   * 已下载的章由 downloader 跳过，所以「继续」永远是断点续传。
+   */
+  resume(jobId) {
+    const j = this.jobs.find((x) => x.id === jobId);
+    if (!j) throw new Error('没有这个下载任务：' + jobId);
+    if (j.status === STATUS.running || j.status === STATUS.queued) return this._snapshot(j);
+
+    // 同一本书已经有别的任务在跑 → 不并发，直接返回那条
+    const other = this.jobs.find(
+      (x) => x !== j && x.bookId === j.bookId && (x.status === STATUS.queued || x.status === STATUS.running)
+    );
+    if (other) return this._snapshot(other);
+
+    j.status = STATUS.queued;
+    j.error = '';
+    j.pauseRequested = false;
+    j.cancelRequested = false;
+    j.finishedAt = 0;
+    j.startedAt = 0;
+    j.updatedAt = Date.now();
+    this._persist();
+    this._emit(j);
+    setImmediate(() => this._pump());
+    return this._snapshot(j);
+  }
+
+  /** 一条任务能不能「继续」（界面按钮的 disabled 依据） */
+  canResume(job) {
+    if (!job) return false;
+    return ![STATUS.queued, STATUS.running].includes(job.status);
+  }
   /** 清空已结束的记录（不动排队/运行中的） */
   clearFinished() {
     const before = this.jobs.length;
@@ -327,8 +403,8 @@ class DownloadQueue {
         from: job.from,
         to: job.to,
         force: job.force,
-        // 本书任务取消 → 不再发起新的章节请求
-        shouldStop: () => !!job.cancelRequested,
+        // 本书任务取消/暂停 → 不再发起新的章节请求
+        shouldStop: () => !!job.cancelRequested || !!job.pauseRequested,
         onProgress: (ev) => {
           if (job.cancelRequested) return;
           job.processed = (job.processed || 0) + 1;
@@ -344,19 +420,21 @@ class DownloadQueue {
       if (job.cancelRequested) {
         job.status = STATUS.canceled;
         job.error = '已取消（已下载的章节保留）';
-      } else if (r.failed && !r.done) {
-        job.status = STATUS.error;
-        job.error = `${r.failed} 章下载失败`;
+      } else if (job.pauseRequested) {
+        job.status = STATUS.paused;
+        job.error = '';
       } else {
         job.status = STATUS.done;
       }
       job.percent = job.status === STATUS.done ? 100 : Math.min(99, job.percent);
       job.finishedAt = Date.now();
+      job.updatedAt = job.finishedAt;
     } catch (e) {
       clearInterval(timer);
-      job.status = job.cancelRequested ? STATUS.canceled : STATUS.error;
+      job.status = job.cancelRequested ? STATUS.canceled : job.pauseRequested ? STATUS.paused : STATUS.error;
       job.error = e && e.message ? e.message : String(e);
       job.finishedAt = Date.now();
+      job.updatedAt = job.finishedAt;
     } finally {
       try {
         this.lib.syncDownloadedCount(job.bookId);
@@ -400,6 +478,7 @@ class DownloadQueue {
       error: job.error || '',
       failedIndexes: (job.failedIndexes || []).slice(0, 50),
       canceling: !!job.cancelRequested && job.status === STATUS.running,
+      pausing: !!job.pauseRequested && job.status === STATUS.running,
       createdAt: job.createdAt,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,

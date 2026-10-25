@@ -32,14 +32,30 @@ const crypto = require('crypto');
  * HTTP 预取层
  * ================================================================== */
 
-/** 生成请求的规范化缓存键 */
+/**
+ * 生成请求的规范化缓存键。
+ *
+ * 只纳入**真正影响请求**的四项：方法、URL、请求体、字符集。
+ *
+ * 历史教训：这里原本还把整个 `headers` 的 JSON 串进键里。但同一批请求在两个地方
+ * 会以不同的 options 形态出现：
+ *  - `getSync`（书源规则里的 `java.ajax(url, JSON.stringify(opt))`）带的是规则原样写的全部字段；
+ *  - `peekSync`（引擎内部查落点）只带 `{ method, body, headers, charset }`。
+ * 于是「带 headers / 带 timeout、retry 之类额外字段的 ajax」在 getSync 登记的键，与引擎
+ * peekSync 查的键**永远不相等**，落点查询恒为 null，引擎误判「还有 miss」再次重跑，
+ * 每轮都重发同一个请求，直到 MAX_ROUNDS（实测哔咔漫画 21s × 64 轮）。
+ *
+ * headers 不进键的代价：同一 URL 用不同 Cookie/UA 请求会命中同一缓存条目。
+ * 这在书源场景里是可接受的取舍——Cookie 已由 CookieJar 在 HTTP 层统一维护，
+ * 规则里手写的 headers 绝大多数是 UA/Referer 常量；而键不含 headers 换来的确定性
+ * 远比重发一轮请求重要。
+ */
 function reqKey(url, opts) {
   const o = opts || {};
   const method = (o.method || 'GET').toUpperCase();
   const body = o.body == null ? '' : String(o.body);
-  const headers = o.headers ? JSON.stringify(o.headers, Object.keys(o.headers).sort()) : '';
   const charset = o.charset || '';
-  return [method, url, body, headers, charset].join('\u0001');
+  return [method, url, body, charset].join('\u0001');
 }
 
 class Prefetcher {

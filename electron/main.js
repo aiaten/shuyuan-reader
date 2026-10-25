@@ -205,7 +205,8 @@ function registerIpc() {
 
   /* 搜索 */
   handle('search:one', (a, key, kw, page) => a.search(key, kw, page || 1));
-  handle('search:all', (a, kw, keys, page) => a.searchAll(kw, keys, page || 1));
+  // opts 透传并发/超时（app.searchAll 已改成并发编排；不传则用其默认值）
+  handle('search:all', (a, kw, keys, page, opts) => a.searchAll(kw, keys, page || 1, opts || {}));
   /**
    * 全书源聚合搜索：每完成一个源就往前端推一次进度事件（增量返回），
    * 前端渲染时能「边搜边出」。返回最终聚合结果。
@@ -233,6 +234,8 @@ function registerIpc() {
   handle('download:enqueue', (a, id, opts) => a.enqueueDownload(id, opts || {}));
   handle('download:list', (a) => a.listDownloads());
   handle('download:cancel', (a, jobId) => a.cancelDownload(jobId));
+  handle('download:pause', (a, jobId) => a.pauseDownload(jobId));
+  handle('download:resume', (a, jobId) => a.resumeDownload(jobId));
   handle('download:clear', (a) => a.clearFinishedDownloads());
   handle('shelf:windowBusy', (a, id) => ({ busy: a.windowBusy(id) }));
   handle('shelf:chapter', (a, id, index) => a.chapter(id, index));

@@ -272,6 +272,82 @@ function mkQueue(lib, dl) {
     assert.ok(list.some((x) => x.id === j.id && x.status === STATUS.done), '已完成记录应保留');
   });
 
+  await at('暂停：运行中的任务停下保留，继续后接着下（断点续传）', async () => {
+    const lib = mkLib(12);
+    const id = lib.add('书P');
+    const { q } = mkQueue(lib, mkDownloader(lib, { perChapterMs: 30 }));
+    const job = q.enqueue({ bookId: id });
+    await wait(120);
+    assert.strictEqual(q.get(job.id).status, STATUS.running, '应先跑起来');
+    const req = q.pause(job.id);
+    assert.ok(req.pausing, '暂停请求应立刻可见（界面显示「正在暂停…」）');
+    await wait(400);
+    const p = q.get(job.id);
+    assert.strictEqual(p.status, STATUS.paused, `应收尾成 paused，实际 ${p.status}`);
+    assert.strictEqual(p.error, '', '暂停不该当成出错');
+    const half = lib.downloadedIndexes(id).size;
+    assert.ok(half > 0 && half < 12, `应下了一半，实际 ${half}`);
+    assert.strictEqual(q.summary().paused, 1);
+    assert.strictEqual(q.summary().active, 0, '暂停不算活动任务');
+
+    // 继续：同一条任务回到 queued，已下的章跳过
+    const r = q.resume(job.id);
+    assert.strictEqual(r.id, job.id, '继续应复用同一条任务，不新开');
+    assert.ok([STATUS.queued, STATUS.running].includes(r.status), `继续后状态 ${r.status}`);
+    await wait(1200);
+    const d = q.get(job.id);
+    assert.strictEqual(d.status, STATUS.done, `继续后应下完，实际 ${d.status}`);
+    assert.strictEqual(d.percent, 100);
+    assert.ok(lib.downloadedIndexes(id).size === 12, '12 章应全部落盘');
+    assert.strictEqual(q.list().length, 1, '不出现一本两行');
+  });
+
+  await at('暂停排队中的任务直接 paused；继续后照常跑', async () => {
+    const lib = mkLib(3);
+    const a = lib.add('Q1');
+    const b = lib.add('Q2');
+    const { q } = mkQueue(lib, mkDownloader(lib, { perChapterMs: 40 }));
+    const ja = q.enqueue({ bookId: a });
+    const jb = q.enqueue({ bookId: b });
+    assert.strictEqual(q.get(jb.id).status, STATUS.queued);
+    const rp = q.pause(jb.id);
+    assert.strictEqual(rp.status, STATUS.paused, '排队中的暂停应立刻生效');
+    assert.ok(/暂停/.test(rp.error));
+    await wait(200);
+    assert.strictEqual(q.get(ja.id).status, STATUS.done, 'A 不受影响');
+    assert.strictEqual(q.get(jb.id).status, STATUS.paused, 'B 仍停在暂停');
+    q.resume(jb.id);
+    await wait(300);
+    assert.strictEqual(q.get(jb.id).status, STATUS.done);
+  });
+
+  await at('暂停状态重启后保留；取消后也能继续', async () => {
+    const lib = mkLib(3);
+    const id = lib.add('R');
+    const dl = mkDownloader(lib, { perChapterMs: 20 });
+    const { q } = mkQueue(lib, dl);
+    const j = q.enqueue({ bookId: id });
+    q.pause(j.id);
+    await wait(200);
+    assert.strictEqual(q.get(j.id).status, STATUS.paused);
+    const q2 = new DownloadQueue({ library: lib, downloader: dl, dataDir: q.dataDir });
+    const back = q2.list().find((x) => x.id === j.id);
+    assert.strictEqual(back.status, STATUS.paused, `重启后应还是 paused，实际 ${back.status}`);
+    assert.ok(!back.pausing, '重启后不该残留「正在暂停」标记');
+
+    // canceled 是终态，但 resume 也允许接着下
+    const q3 = new DownloadQueue({ library: lib, downloader: dl, dataDir: path.join(root, 'r3') });
+    fs.mkdirSync(q3.dataDir, { recursive: true });
+    const c = q3.enqueue({ bookId: id });
+    await wait(30);
+    q3.cancel(c.id);
+    await wait(200);
+    assert.strictEqual(q3.get(c.id).status, STATUS.canceled);
+    q3.resume(c.id);
+    await wait(300);
+    assert.strictEqual(q3.get(c.id).status, STATUS.done, '取消的任务也能接着下完');
+  });
+
   await at('书架没这本书 / 本地没目录 → enqueue 抛错', async () => {
     const lib = mkLib();
     const { q } = mkQueue(lib, mkDownloader(lib));

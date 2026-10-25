@@ -339,11 +339,12 @@ const dlNotified = new Set();
 function dlStatusText(j) {
   switch (j.status) {
     case 'queued': return '排队中';
-    case 'running': return j.canceling ? '正在停止…' : '下载中';
+    case 'running': return j.canceling ? '正在停止…' : j.pausing ? '正在暂停…' : '下载中';
     case 'done': return '已完成';
     case 'error': return '失败';
     case 'canceled': return '已取消';
     case 'interrupted': return '已中断';
+    case 'paused': return '已暂停';
     default: return j.status;
   }
 }
@@ -356,6 +357,7 @@ function dlStatusBadge(j) {
     error: 'badge err',
     canceled: 'badge warn',
     interrupted: 'badge warn',
+    paused: 'badge warn',
   };
   return `<span class="${map[j.status] || 'badge'}">${esc(dlStatusText(j))}</span>`;
 }
@@ -374,7 +376,7 @@ function fmtDur(ms) {
 function dlMetaLine(j) {
   const span = `第 ${j.from + 1}–${j.to + 1} 章（共 ${j.total} 章）`;
   const parts = [span];
-  if (j.status === 'running' || j.status === 'done' || j.status === 'canceled' || j.status === 'error') {
+  if (j.status === 'running' || j.status === 'done' || j.status === 'canceled' || j.status === 'error' || j.status === 'paused') {
     parts.push(`成功 ${j.done} · 跳过 ${j.skipped} · 失败 ${j.failed}`);
   }
   if (j.startedAt && j.finishedAt) parts.push(`耗时 ${fmtDur(j.finishedAt - j.startedAt)}`);
@@ -389,8 +391,8 @@ function renderDownloads() {
   if (!list) return;
   const s = dlCache.summary || {};
   const jobs = (dlCache.jobs || []).filter((j) => {
-    if (dlFilter === 'active') return j.status === 'queued' || j.status === 'running';
-    if (dlFilter === 'finished') return j.status !== 'queued' && j.status !== 'running';
+    if (dlFilter === 'active') return j.status === 'queued' || j.status === 'running' || j.status === 'paused';
+    if (dlFilter === 'finished') return j.status !== 'queued' && j.status !== 'running' && j.status !== 'paused';
     return true;
   });
 
@@ -400,12 +402,13 @@ function renderDownloads() {
     const bits = [];
     if (s.running) bits.push(`下载中 ${s.running}`);
     if (s.queued) bits.push(`排队 ${s.queued}`);
+    if (s.paused) bits.push('已暂停 ' + s.paused);
     if (s.done) bits.push(`已完成 ${s.done}`);
     if (s.error) bits.push(`失败 ${s.error}`);
     sumEl.textContent = bits.length ? bits.join(' · ') : '空闲';
   }
   const dot = $('#dlTabDot');
-  if (dot) dot.hidden = !(s.active > 0);
+  if (dot) dot.hidden = !((s.active || 0) > 0 || (s.paused || 0) > 0);
 
   const empty = $('#dlEmpty');
   if (empty) empty.hidden = jobs.length > 0;
@@ -435,13 +438,14 @@ function renderDownloads() {
         </div>
         <div class="dl-actions">
           <button class="btn tiny" data-dlact="read" ${j.status === 'done' ? '' : 'disabled'}>阅读</button>
-          <button class="btn tiny ghost" data-dlact="cancel" ${canCancel ? '' : 'disabled'}>${running ? '停止' : '取消'}</button>
-          <button class="btn tiny ghost" data-dlact="retry" ${j.status === 'running' || j.status === 'queued' ? 'disabled' : ''}>重下</button>
+          <button class="btn tiny ghost" data-dlact="cancel" ${canCancel ? (running ? "" : "disabled") : "disabled"} title="停止并放弃这次任务（已下载的章节保留）">${running ? "停止" : "取消"}</button>
+          <button class="btn tiny ghost" data-dlact="pause" ${j.status === "running" && !j.canceling && !j.pausing ? "" : "disabled"} title="停下但保留任务（本章跑完就收手），之后可以继续">暂停</button>
+          <button class="btn tiny ghost" data-dlact="resume" ${canCancel ? "disabled" : ""} title="接着下剩下的章节（已下载的会自动跳过）">继续</button>
+          <button class="btn tiny ghost" data-dlact="retry" ${j.status === "running" || j.status === "queued" ? "disabled" : ""}>重下</button>
         </div>
       </div>`;
     })
     .join('');
-
   // 事件委托：一次绑定，重渲染不用重挂
   list.onclick = async (e) => {
     const btn = e.target.closest('[data-dlact]');
@@ -457,6 +461,20 @@ function renderDownloads() {
       const r = await run('正在停止…', () => window.api.cancelDownload(jobId));
       if (r) toast(r.status === 'canceled' ? '任务已取消' : '已请求停止，本章跑完就收手', 'ok');
       await refreshDownloads();
+    } else if (act === 'pause') {
+      // 暂停 = 停下但保留任务，之后点「继续」接着下（已下载的章会跳过）
+      const r = await run('正在暂停…', () => window.api.pauseDownload(jobId));
+      if (r) {
+        if (r.status === 'paused') {
+          toast('《' + r.bookName + '》已暂停：已下载 ' + r.done + ' 章，点「继续」接着下', 'ok');
+        } else {
+          toast('已请求暂停，本章跑完就收手', 'ok');
+        }
+      }
+      await refreshDownloads();
+    } else if (act === 'resume') {
+      const job = (dlCache.jobs || []).find((x) => x.id === jobId);
+      await resumeJob(jobId, job);
     } else if (act === 'retry') {
       // 重下 = 用同一区间再入队一次（断点续传，已下载的章会跳过）
       const job = (dlCache.jobs || []).find((x) => x.id === jobId);
@@ -491,6 +509,8 @@ async function refreshDownloads(pushToast = false) {
         toast(`《${j.bookName}》下载完成：成功 ${j.done}，失败 ${j.failed}`, j.failed ? 'err' : 'ok');
       } else if (j.status === 'error') {
         toast(`《${j.bookName}》下载失败：${j.error || '未知错误'}`, 'err');
+      } else if (j.status === 'paused') {
+        toast('《' + j.bookName + '》已暂停：进度 ' + (j.percent || 0) + '%，点「继续」接着下', '');
       } else if (j.status === 'canceled') {
         toast(`《${j.bookName}》下载已取消`, '');
       }
@@ -499,8 +519,8 @@ async function refreshDownloads(pushToast = false) {
     }
   }
 
-  // 轮询节奏：有活动任务 → 继续；否则停表（再次入队时重新启动）
-  const active = (r.summary && r.summary.active) || 0;
+  // 轮询节奏：有活动任务或还有暂停待续的任务 → 继续；否则停表（再次入队时重新启动）
+  const active = ((r.summary && r.summary.active) || 0) + ((r.summary && r.summary.paused) || 0);
   if (active > 0 && !dlTimer) {
     dlTimer = setInterval(() => refreshDownloads(true), DL_POLL_MS);
   } else if (active === 0 && dlTimer) {
@@ -532,6 +552,28 @@ async function startDownload(bookId, opts = {}) {
   toast(`《${job.bookName}》${tag}：第 ${job.from + 1}–${job.to + 1} 章（进度见「下载」页签）`, 'ok');
   await refreshDownloads();
   return job;
+
+}
+/**
+ * 继续一条停下的任务（暂停 / 取消 / 中断 / 失败都能续）。
+ *
+ * 语义上等价于「接着下区间里剩下的章」：主进程会把状态推回 queued，
+ * downloader 跳过已存在的章节文件，所以不会从头再来。
+ */
+async function resumeJob(jobId, job) {
+  let r;
+  try {
+    r = await window.api.resumeDownload(jobId);
+  } catch (e) {
+    toast(e && e.message ? e.message : String(e), 'err');
+    return null;
+  }
+  if (r) {
+    const span = job ? ('第 ' + (job.from + 1) + '–' + (job.to + 1) + ' 章') : '剩余章节';
+    toast('《' + r.bookName + '》继续下载：' + span + '（已下载的会自动跳过）', 'ok');
+  }
+  await refreshDownloads();
+  return r;
 }
 
 /** 下载页签初始化：事件推送 + 首次拉取 */
@@ -2877,3 +2919,9 @@ window.addEventListener('beforeunload', () => {
   // 每次打开软件自动检查一次书架更新（后台跑；结果只写回书架条目）
   autoCheckShelfUpdates();
 })();
+
+
+
+
+
+

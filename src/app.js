@@ -365,21 +365,62 @@ class App {
   }
 
   /**
-   * 跨多个书源并发搜索（并行度受限）。
+   * 跨多个书源搜索。
+   *
+   * 历史教训：这里原本是 `for (const k of keys) await this.search(...)` 的**串行**循环，
+   * 单个源慢性超时（例如书源 searchUrl 是 `<js>` 片段、预取规则不收敛）会把整轮耗时
+   * 累加成「源数 × 单源耗时」，界面表现为搜索永远转圈。现在改成并发 + 单源超时，
+   * 与 `searchEverywhere` 用同一套编排参数语义（并发数 / 单源超时 / 整轮 deadline）。
+   *
    * @param {string[]} sourceKeys 留空 = 全部书源
+   * @param {number} [page=1]
+   * @param {object} [opts] { concurrency=6, perSourceTimeout=15000, totalTimeout=45000 }
+   * @returns {Promise<Array<{ok:boolean, sourceKey:string, source:string, keyword:string, page:number, list:Array, error?:string}>>}
    */
-  async searchAll(keyword, sourceKeys, page = 1) {
+  async searchAll(keyword, sourceKeys, page = 1, opts = {}) {
     const keys = sourceKeys && sourceKeys.length ? sourceKeys : this.sources.all().map(keyOf);
-    const out = [];
-    for (const k of keys) {
-      try {
-        // eslint-disable-next-line no-await-in-loop
-        const r = await this.search(k, keyword, page);
-        out.push({ ok: true, ...r });
-      } catch (e) {
-        out.push({ ok: false, sourceKey: k, source: k, keyword, page, list: [], error: e.message });
+    const concurrency = Math.max(1, Math.min(opts.concurrency || 6, 16));
+    // 下限 200ms 的理由同 searchEverywhere：这些值只用于 race 定时，不参与网络层
+    const perSourceTimeout = opts.perSourceTimeout ? Math.max(200, opts.perSourceTimeout) : 15000;
+    const totalTimeout = opts.totalTimeout ? Math.max(200, opts.totalTimeout) : 45000;
+
+    const startedAt = Date.now();
+    const deadline = startedAt + totalTimeout;
+    const out = new Array(keys.length);
+    const queue = keys.map((k, i) => ({ k, i }));
+
+    const worker = async () => {
+      for (;;) {
+        const job = queue.shift();
+        if (!job) return;
+        const remain = deadline - Date.now();
+        if (remain <= 0) {
+          out[job.i] = {
+            ok: false, sourceKey: job.k, source: job.k, keyword, page, list: [],
+            error: `整体超时（>${totalTimeout}ms）未执行`, totalTimeout,
+          };
+          continue;
+        }
+        // 取 min(单源超时, 剩余整体时间)，保证整轮不会越过 deadline
+        const slice = Math.max(1, Math.min(perSourceTimeout, remain));
+        let to = false;
+        const timer = new Promise((resolve) => setTimeout(() => { to = true; resolve('__timeout__'); }, slice));
+        try {
+          const r = await Promise.race([this.search(job.k, keyword, page), timer]);
+          if (r === '__timeout__') {
+            out[job.i] = { ok: false, sourceKey: job.k, source: job.k, keyword, page, list: [],
+              error: `超时（>${slice}ms）`, timedOut: true };
+          } else {
+            out[job.i] = { ok: true, ...r };
+          }
+        } catch (e) {
+          out[job.i] = { ok: false, sourceKey: job.k, source: job.k, keyword, page, list: [],
+            error: e && e.message ? e.message : String(e), timedOut: to };
+        }
       }
-    }
+    };
+
+    await Promise.all(Array.from({ length: Math.min(concurrency, queue.length) }, () => worker()));
     return out;
   }
 
@@ -1196,6 +1237,19 @@ class App {
   /** 取消一条下载任务：排队中的立刻撤下，运行中的本章跑完即收手 */
   cancelDownload(jobId) {
     return this.downloads.cancel(jobId);
+  }
+
+  /**
+   * 暂停一条下载任务（停止但保留任务）：排队中的直接停下，运行中的本章跑完即收手。
+   * 与 cancelDownload 的区别：收尾是 paused，界面会给「继续」，已下的章节不丢。
+   */
+  pauseDownload(jobId) {
+    return this.downloads.pause(jobId);
+  }
+
+  /** 继续一条停下的任务（paused / canceled / interrupted / error）：原地断点续传 */
+  resumeDownload(jobId) {
+    return this.downloads.resume(jobId);
   }
 
   /** 清掉已结束的任务记录（排队/运行中的保留） */

@@ -32,7 +32,8 @@ t('peekSync 返回缓存条目本体（含 url 字段）', () => {
   const p = new Prefetcher();
   // 模拟 http.js 的行为：请求 A，30x 后落在 B，缓存条目里的 url 是 B
   p.cache.set(
-    ['GET', 'https://www.deqixss.com/modules/article/search.php?searchkey=x', '', '', ''].join('\u0001'),
+    // 键 = [method, url, body, charset]（headers 不进键，见 jsrt.js::reqKey 的注释）
+    ['GET', 'https://www.deqixss.com/modules/article/search.php?searchkey=x', '', ''].join('\u0001'),
     { status: 200, text: '<html>详情页</html>', url: 'https://www.deqixss.com/books/126/' }
   );
   const hit = p.peekSync('https://www.deqixss.com/modules/article/search.php?searchkey=x', { method: 'GET' });
