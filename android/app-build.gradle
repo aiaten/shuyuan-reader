@@ -3,7 +3,7 @@ apply plugin: 'com.android.application'
 android {
     signingConfigs {
         release {
-            storeFile file(System.getenv("SHUYUAN_KEYSTORE") ?: "C:/android/shuyuan.keystore")
+            storeFile file(System.getenv("SHUYUAN_KEYSTORE") ?: "D:/AI/data/android/shuyuan.keystore")
             storePassword System.getenv("SHUYUAN_STOREPASS") ?: "shuyuan2024"
             keyAlias System.getenv("SHUYUAN_KEYALIAS") ?: "shuyuan"
             keyPassword System.getenv("SHUYUAN_KEYPASS") ?: "shuyuan2024"

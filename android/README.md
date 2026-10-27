@@ -80,6 +80,20 @@ Electron 用 `<webview>` 做内置浏览器；安卓的 Capacitor 主 WebView �
 
 需要 JDK 21、Android SDK（platform 36 / build-tools 36 / NDK 27）、Gradle 8.14.3。
 
+本机工具链统一装在 D 盘（约定：环境/工具不装 C 盘）：
+
+| 组件 | 路径 |
+| --- | --- |
+| JDK 21 | `D:\AI\data\android\jdk21\jdk-21.0.2` |
+| Android SDK | `D:\AI\data\android\sdk` |
+| Gradle 8.14.3 | `D:\AI\data\android\gradle8143\gradle-8.14.3` |
+| Gradle 缓存 | `D:\AI\data\android\gradle-home` |
+| Capacitor 工程 | `D:\AI\data\android\app` |
+| keystore | `D:\AI\data\android\shuyuan.keystore` |
+| AVD | `D:\AI\data\android\.android\avd` |
+
+`adb` / `gradle` / `java` 已加入用户 PATH；`TMP`/`TEMP` 也指向 `D:\AI\data\temp`。
+
 ```bash
 npm install                 # @capacitor/* + capacitor-nodejs.tgz + cheerio + iconv-lite
 npx cap add android         # 首次
@@ -101,7 +115,7 @@ cd android && gradle assembleRelease
 APK 大是因为 `libnode.so` 每个 ABI 都 60 MB 上下——Node 运行时本身就这个量级。
 
 签名：`android/app/build.gradle` 里读环境变量 `SHUYUAN_KEYSTORE` / `SHUYUAN_STOREPASS` /
-`SHUYUAN_KEYALIAS` / `SHUYUAN_KEYPASS`，缺省指向本机调试用的 keystore。
+`SHUYUAN_KEYALIAS` / `SHUYUAN_KEYPASS`，缺省指向 `D:/AI/data/android/shuyuan.keystore`（本机调试用，别的机器请用环境变量覆盖）。
 
 ## 已知限制
 
