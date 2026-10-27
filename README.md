@@ -85,6 +85,23 @@ data/
 
 `bookId` 为 `site_url + book_url` 的稳定哈希，重复添加同一本书不会产生新目录。
 
+## 安卓版
+
+桌面版的引擎可以**原样**跑到 Android 上：`src/` 一行不改，界面复用 `electron/renderer/`，
+Electron 的 IPC 换成 capacitor-nodejs 的消息通道。移植层源码与构建说明见 [`android/`](android/README.md)。
+
+可以直接安装的成品（已签名）：
+
+| 文件 | 体积 | 说明 |
+| --- | --- | --- |
+| `dist/书源阅读器-0.3.0-android-arm64.apk` | 54.6 MB | arm64 手机，绝大多数情况装这个 |
+| `dist/书源阅读器-0.3.0-android-arm32.apk` | 50.6 MB | 老 32 位机 |
+| `dist/书源阅读器-0.3.0-android-universal.apk` | 153 MB | 三个 ABI 都带，不会装错但很大 |
+
+APK 大是因为每个 ABI 都塞了 60 MB 上下的 `libnode.so`（Node 18.20.4 运行时）。
+安卓版没有内嵌浏览器页签（Capacitor 主 WebView 会把外链交给系统浏览器），
+书源搜索、书架、下载队列、导出都正常。
+
 ## 运行
 
 ```bash

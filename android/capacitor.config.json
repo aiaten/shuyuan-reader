@@ -1,0 +1,9 @@
+{
+  "appId": "com.aiaten.shuyuanreader",
+  "appName": "书源阅读器",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "plugins": {
+    "CapacitorNodeJS": { "nodeDir": "nodejs" }
+  }
+}

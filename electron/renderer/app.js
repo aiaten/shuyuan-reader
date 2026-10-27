@@ -626,10 +626,10 @@ function initDownloads() {
     if (r) toast(`已清掉 ${r.removed} 条记录`, 'ok');
     await refreshDownloads();
   };
-  $('#dlFilter .seg-btn').forEach((btn) => {
+  $$('#dlFilter .seg-btn').forEach((btn) => {
     btn.onclick = () => {
       dlFilter = btn.dataset.dlfilter;
-      $('#dlFilter .seg-btn').forEach((b) => b.classList.toggle('active', b === btn));
+      $$('#dlFilter .seg-btn').forEach((b) => b.classList.toggle('active', b === btn));
       renderDownloads();
     };
   });
