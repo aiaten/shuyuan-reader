@@ -117,6 +117,14 @@ APK 大是因为 `libnode.so` 每个 ABI 都 60 MB 上下——Node 运行时本
 签名：`android/app/build.gradle` 里读环境变量 `SHUYUAN_KEYSTORE` / `SHUYUAN_STOREPASS` /
 `SHUYUAN_KEYALIAS` / `SHUYUAN_KEYPASS`，缺省指向 `D:/AI/data/android/shuyuan.keystore`（本机调试用，别的机器请用环境变量覆盖）。
 
+## 界面适配（手机）
+
+安卓壳（以及任何宽度 ≤720px 的窗口）会切到「左侧竖排导航」布局：
+
+- `applyLayoutMode()` 判断 `window.api.__android`（api-bridge.js 里写的标记）或 `window.innerWidth <= 720`，为真时给 `<html>` 加 `data-layout="rail"`。
+- `style.css` 里 `html[data-layout="rail"]` 把顶栏变成 `position:fixed; left:0; width:88px; height:100%; flex-direction:column`，页签自上而下排列，`main` 用 `margin-left:88px` 让开。
+- 进入阅读器时 `setReading(true)` 加 `data-reading="1"`，CSS 把整条导航 `display:none` 并把 `margin-left` 归零，把屏幕全给正文；点返回或切页签时 `setReading(false)` 自动恢复。
+- 桌面端（无安卓标记且窗口够宽）行为不变：仍是顶部横排，`data-layout` 被移除。
 ## 已知限制
 
 - **Node 18 已 EOL**。上游 nodejs-mobile 停在 18.20.4，且 capacitor-nodejs 作者已标注

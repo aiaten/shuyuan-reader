@@ -203,6 +203,74 @@ html, body {
 /* 主题按钮宽度按最长文案「🌙 夜间」预留，切换时不会把右边的内容顶来顶去 */
 #btnTheme { min-width: 76px; }
 
+/* ---------------- 窄屏 / 安卓：左侧竖排导航 + 阅读时隐藏导航 ----------------
+
+   手机竖屏宽度只有 360~430px，六个页签横排在顶部会折成两行、常驻占掉一条高度。
+   app.js 的 applyLayoutMode() 在「安卓壳」或窗口宽度 <= 720px 时给 <html> 加
+   data-layout="rail"，这里就把顶栏整条挪到左边、由上往下排。
+   桌面窗口（minWidth 900）永远走顶部横排，外观不变。
+
+   data-reading="1" 由 openReader() 设置、switchView() 清除：
+   进阅读器时把导航收起来整屏给正文，点「← 返回」回到书架再出现。
+   （阅读器自己有一条 reader-bar，返回按钮在那里，所以藏掉顶栏不会把人困住。） */
+
+html[data-layout="rail"] .topbar {
+  position: fixed;
+  inset: 0 auto 0 0;
+  z-index: 40;
+  width: var(--rail-w, 88px);
+  height: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+  padding: 10px 8px;
+  border-bottom: 0;
+  border-right: 1px solid var(--line);
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+html[data-layout="rail"] .brand {
+  font-size: 13px;
+  letter-spacing: 0;
+  text-align: center;
+  padding: 2px 0 8px;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+html[data-layout="rail"] .tabs {
+  flex-direction: column;
+  gap: 6px;
+}
+html[data-layout="rail"] .tab {
+  width: 100%;
+  padding: 10px 8px;
+  font-size: 14px;
+  text-align: center;
+  white-space: nowrap;
+}
+html[data-layout="rail"] .topbar-right {
+  margin: auto 0 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+/* 数据目录那一长串在竖排栏里放不下，留给「统计」对话框 */
+html[data-layout="rail"] #dataDir { display: none; }
+html[data-layout="rail"] #btnTheme { min-width: 0; }
+html[data-layout="rail"] main {
+  height: 100%;
+  margin-left: var(--rail-w, 88px);
+}
+/* 竖排导航吃掉横向空间后，工具条按钮太挤就把内边距收一档 */
+html[data-layout="rail"] .pane-toolbar,
+html[data-layout="rail"] .reader-bar { padding: 8px 10px; gap: 6px; }
+
+/* 阅读中：导航整条收起 */
+html[data-reading="1"] .topbar { display: none; }
+html[data-reading="1"] main { height: 100%; margin-left: 0; }
+
 /* ---------------- 主区 ---------------- */
 
 main { height: calc(100% - 52px); position: relative; }

@@ -7,6 +7,27 @@
 const $ = (sel) => document.querySelector(sel);
 const $$ = (sel) => Array.from(document.querySelectorAll(sel));
 
+/* ---------------- 界面形态：窄屏 / 安卓改用左侧竖排导航 ---------------- */
+
+/**
+ * 安卓手机屏幕窄，六个页签横排在顶部会挤成两行、还一直占着一条高度，
+ * 所以窄屏改成左侧竖排（由上往下），把横向空间留给内容。
+ * 宽度回到桌面档就自动切回顶部横排，桌面端外观完全不变。
+ */
+function applyLayoutMode() {
+  const root = document.documentElement;
+  const android = !!(window.api && window.api.__android);
+  if (android || window.innerWidth <= 720) root.setAttribute('data-layout', 'rail');
+  else root.removeAttribute('data-layout');
+}
+
+/** 进阅读器时把导航整条收起来，把屏幕交给正文；回书架自动恢复 */
+function setReading(on) {
+  const root = document.documentElement;
+  if (on) root.setAttribute('data-reading', '1');
+  else root.removeAttribute('data-reading');
+}
+
 /* ---------------- 阅读设置（字体样式 / 字号 / 行距 / 页宽） ---------------- */
 
 /**
@@ -343,6 +364,8 @@ function switchView(name, opts = {}) {
   }
   const backToOnline = name === 'online' && currentView !== 'online';
   currentView = name;
+  // 从阅读器退出来时把导航恢复；切别的页签也顺手清掉（阅读态只会由 openReader 打开）
+  if (name !== 'reader') setReading(false);
   $$('.tab').forEach((t) => t.classList.toggle('active', t.dataset.view === name));
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + name));
   // skipLoad：调用方自己负责加载（启动时先 await loadShelf 再自动检查更新，避免重复读盘）
@@ -1313,6 +1336,8 @@ async function openReader(bookId) {
 
   $$('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-reader'));
   $$('.tab').forEach((t) => t.classList.remove('active'));
+  // 阅读时自动隐藏导航（顶部标签 / 左侧竖排都收起），整屏给正文
+  setReading(true);
   $('#readerTitle').textContent = `${book.name}${book.author ? ' · ' + book.author : ''}`;
   await showChapter(reader.index);
 }
@@ -3090,6 +3115,8 @@ window.addEventListener('beforeunload', () => {
 
 
 (async function init() {
+  applyLayoutMode();
+  window.addEventListener('resize', applyLayoutMode);
   const i = await window.api.info();
   if (i) $('#dataDir').textContent = i.dataDir;
   // 阅读偏好先应用，再开书，避免第一屏用默认字号闪一下
