@@ -308,6 +308,31 @@ class SourceEngine {
     return String(u).trim().replace(/\/+$/, '');
   }
 
+  /**
+   * 拆 `url,{options}`：Legado AnalyzeUrl 的选项内嵌写法不只用于 searchUrl ——
+   * bookUrl / tocUrl / 章节 URL 同样可能带（真实用例：书旗小说 8011 的 bookUrl
+   * = `https://…/book/info,{"body":"user_id=…&…","method":"POST"}`）。
+   * 此前只有 search/explore 解析选项，detail/toc/正文把整串当 URL 抓必挂。
+   */
+  _splitUrlOptions(u) {
+    const s = String(u || '').trim();
+    // 快速通道：没有 `,{` 就原样返回
+    const idx = s.indexOf(',{');
+    if (idx < 0) return { url: s, options: {} };
+    const urlRaw = s.slice(0, idx).trim();
+    const optStr = s.slice(idx + 1);
+    let options = {};
+    try {
+      options = JSON.parse(optStr);
+    } catch (_) {
+      const end = optStr.lastIndexOf('}');
+      if (end > 0) {
+        try { options = JSON.parse(optStr.slice(0, end + 1)); } catch (_e) { options = {}; }
+      }
+    }
+    return { url: urlRaw, options: options || {} };
+  }
+
   _headers() {
     return parseHeader(this.source.header);
   }
@@ -591,9 +616,17 @@ class SourceEngine {
   _readBookInfo($, rt, url) {
     const ri = this.source.ruleBookInfo || {};
     const ctx = { baseUrl: this.baseUrl, source: this.source, js: rt };
+    // init 规则（Legado `AnalyzeRule.setInitContent`）：把后续字段规则的求值内容
+    // 替换为 init 的产出。JSON API 详情页的典型写法 `init = "$.data"`，之后
+    // name/author 等直接写键名（真实用例：书旗小说 8011）。
+    let initObj = null;
     const get = (rule) => {
       if (!rule) return '';
       if (rule === '{{baseUrl}}') return this.baseUrl;
+      if (initObj && typeof initObj === 'object') {
+        const v = R.pickItemField(initObj, rule, { ...ctx, js: rt });
+        return v == null ? '' : String(v);
+      }
       if (/^\{\{[\s\S]*\}\}$/.test(rule)) {
         const v = rt.run(rule.replace(/^\{\{|\}\}$/g, ''), { baseUrl: this.baseUrl, ...ctx });
         return v == null ? '' : String(v);
@@ -601,7 +634,25 @@ class SourceEngine {
       const r = R.evalRule(rule, $, ctx, {});
       return r.text;
     };
-    const info = {
+    let info;
+    if (ri.init && /^\$|^\[?\(|^@json:/i.test(String(ri.init).trim())) {
+      // JSON 型 init：先用 JSONPath 从页面原文取出子对象
+      try {
+        const iv = R.evalRule(String(ri.init), $, ctx, {});
+        let v = iv.items && iv.items.length
+          ? iv.items
+          : iv.strings && iv.strings.length === 1 ? iv.strings[0] : (iv.text || '');
+        if (Array.isArray(v)) v = v[0];
+        if (v && typeof v === 'object') initObj = v;
+        else if (typeof v === 'string') {
+          const t = v.trim();
+          if (t.startsWith('{') || t.startsWith('[')) {
+            try { initObj = JSON.parse(t); } catch (_) { initObj = null; }
+          }
+        }
+      } catch (_) { initObj = null; }
+    }
+    info = {
       name: get(ri.name),
       author: get(ri.author),
       kind: get(ri.kind),
@@ -622,9 +673,15 @@ class SourceEngine {
   }
 
   async bookInfo(bookUrl) {
-    const url = this._abs(bookUrl);
+    const split0 = this._splitUrlOptions(this._abs(bookUrl));
+    const url = split0.url;
     return this._runWithPrefetch(async (rt) => {
-      const html = rt.prefetcher.getSync(url, { method: 'GET' });
+      const html = rt.prefetcher.getSync(url, {
+        method: split0.options.method || 'GET',
+        body: split0.options.body,
+        headers: split0.options.headers || {},
+        charset: split0.options.charset,
+      });
       if (!html) return null;
       const $ = loadDoc(html);
       return this._readBookInfo($, rt, url);
@@ -649,7 +706,14 @@ class SourceEngine {
    * @returns {Promise<null|Array<{name,url,index,isVolume,isVip,isPay,tag,baseUrl}>>}
    */
   async toc(tocUrl) {
-    const url = this._abs(tocUrl || this.baseUrl);
+    const split0 = this._splitUrlOptions(this._abs(tocUrl || this.baseUrl));
+    const url = split0.url;
+    const firstOpts = {
+      method: split0.options.method || 'GET',
+      body: split0.options.body,
+      headers: split0.options.headers || {},
+      charset: split0.options.charset,
+    };
     const rc = this.source.ruleToc || {};
     let listRule = rc.chapterList == null ? '' : String(rc.chapterList);
     let reverse = false;
@@ -732,7 +796,8 @@ class SourceEngine {
         const cur = serialNext;
         if (!cur || visited.has(cur)) break;
         visited.add(cur);
-        const html = rt.prefetcher.getSync(cur, { method: 'GET' });
+        // 首页可能带内嵌请求选项（`url,{options}`），后续翻页按普通 GET
+        const html = rt.prefetcher.getSync(cur, cur === url ? firstOpts : { method: 'GET' });
         if (!html) return null;
         const p = parsePage(html, cur, true);
         chapters.push(...p.items);
@@ -808,7 +873,14 @@ class SourceEngine {
    * @returns {Promise<null|{text:string,url:string,pageCount:number,pageUrls:string[],title:string,nextContentUrl:string}>}
    */
   async content(chapterUrl, opts = {}) {
-    const url = this._abs(chapterUrl);
+    const split0 = this._splitUrlOptions(this._abs(chapterUrl));
+    const url = split0.url;
+    const firstOpts = {
+      method: split0.options.method || 'GET',
+      body: split0.options.body,
+      headers: split0.options.headers || {},
+      charset: split0.options.charset,
+    };
     const rc = this.source.ruleContent || {};
     const maxPages = Math.max(1, opts.maxPages || 50);
     const nextChapterAbs = opts.nextChapterUrl ? R.absUrl(url, this._abs(opts.nextChapterUrl)) : '';
@@ -873,7 +945,8 @@ class SourceEngine {
         const cur = serialNext;
         if (!cur || visited.has(cur)) break;
         visited.add(cur);
-        const html = rt.prefetcher.getSync(cur, { method: 'GET' });
+        // 首页可能带内嵌请求选项（`url,{options}`），后续翻页按普通 GET
+        const html = rt.prefetcher.getSync(cur, cur === url ? firstOpts : { method: 'GET' });
         if (!html) return null;
         const p = parsePage(html, cur);
         if (!firstPage) firstPage = p;

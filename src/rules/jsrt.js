@@ -553,7 +553,24 @@ class JsRuntime {
       base64Decode: (s) => javaDecodeBuffer(Buffer.from(String(s), 'base64'), 'utf-8'),
       base64Encode: (s) => Buffer.from(String(s), 'utf8').toString('base64'),
       base64DecodeToByteArray: (s) => new Uint8Array(Buffer.from(String(s), 'base64')),
-      encodeURI: (s) => encodeURI(String(s)),
+      encodeURI: (s, charset) => {
+        const str = String(s);
+        if (!charset) return encodeURI(str);
+        // 带字符集的 URL 编码（Legado `java.encodeURI(key,'gbk')`）：按指定字符集取字节，
+        // 非保留字符原样，其余逐字节 %XX。真实用例：七步阁 GBK 搜索（短词 + UTF-8 编码
+        // 都会被站点判「关键字最少 4 个字符」之外的正确性问题）。
+        const buf = javaCharsetBuffer(str, charset);
+        let out = '';
+        for (const b of buf) {
+          if ((b >= 0x41 && b <= 0x5a) || (b >= 0x61 && b <= 0x7a) || (b >= 0x30 && b <= 0x39) ||
+              b === 0x2d || b === 0x5f || b === 0x2e || b === 0x7e) {
+            out += String.fromCharCode(b);
+          } else {
+            out += '%' + b.toString(16).toUpperCase().padStart(2, '0');
+          }
+        }
+        return out;
+      },
       decodeURI: (s) => { try { return decodeURI(String(s)); } catch (_) { return String(s); } },
       encodeURIComponent: (s) => encodeURIComponent(String(s)),
       decodeURIComponent: (s) => { try { return decodeURIComponent(String(s)); } catch (_) { return String(s); } },
@@ -598,6 +615,11 @@ class JsRuntime {
       getWebViewUA: () => '',
       readFile: () => '',
       writeFile: () => {},
+      /* ---- 会话变量（Legado JsExtensions.put/get，新版书源常用） ----
+       * 真实用例：长佩文学 8018 searchUrl 的 `{{java.put("key",key);key}}`，
+       * 缺了它整条搜索 URL 直接构造失败。 */
+      put: (k, v) => { self.memory.set(String(k), v); return v; },
+      get: (k) => { const v = self.memory.get(String(k)); return v === undefined ? '' : v; },
     };
 
     const source = {
@@ -618,6 +640,9 @@ class JsRuntime {
       getLoginInfoMap: () => ({}),
       getLoginInfo: () => '',
       removeLoginInfo: () => {},
+      // 真实用例：书旗小说 8011 jsLib 的 GetUrl() 取登录头构造请求
+      getLoginHeaderMap: () => ({}),
+      getLoginHeader: () => '',
     };
 
     const cookie = {
@@ -675,6 +700,11 @@ class JsRuntime {
       cookie,
       C,
       J,
+      // `$` = 当前 result（对齐 Legado 在 {{}} / @js 里 `$.字段` 直取的写法；
+      // 真实用例：书旗小说 8011 bookUrl 模板 `{{$.bookId||$.bid}}`）
+      $: vars.result == null ? null : vars.result,
+      // `src` = 当前页面原文（Legado 目录规则 `<js>` 里 `JSON.parse(src)` 的写法）
+      src: vars.result == null ? null : vars.result,
       Packages: P.Packages || { java: P.java, javax: P.javax, android: P.android },
       JSON,
       String,
@@ -746,9 +776,35 @@ class JsRuntime {
         this.logger(`[jslib] 注入 ${Object.keys(this._jsLibFn).length} 个全局：${Object.keys(this._jsLibFn).slice(0, 12).join(', ')}`);
       }
     } catch (e) {
-      this._jsLibFn = null;
-      this._jsLibState = 'fail';
-      this.errors.push(`jsLib 预编译失败：${e && e.message ? e.message : e}`);
+      // 宽松重试：部分书源 jsLib 用 `let x` 重声明同名形参（Rhino 容忍，V8 一律
+      // SyntaxError，真实用例：书旗小说 8011 的 `function GetUrl(path, params,
+      // sourceUrl) { let sourceUrl = … }`）。整体降级为 var 再试一次 —— 声明提升
+      // 语义对这种工具库几乎无影响，换来的可用性远大于风险。
+      try {
+        const relaxed = libText.replace(/\b(?:let|const)\s+/g, 'var ');
+        const probeSandbox2 = this._buildSandbox({});
+        const before2 = new Set(Reflect.ownKeys(probeSandbox2));
+        const ctx2 = vm.createContext(probeSandbox2, { name: 'jslib-init-relaxed' });
+        vm.runInContext(relaxed, ctx2, { timeout: 8000, filename: 'jslib-relaxed.js' });
+        const out2 = {};
+        for (const k of Reflect.ownKeys(probeSandbox2)) {
+          if (before2.has(k)) continue;
+          try {
+            const v = probeSandbox2[k];
+            if (v !== undefined && v !== null) out2[k] = v;
+          } catch (_) {}
+        }
+        this._jsLibFn = out2;
+        this._jsLibState = 'ok';
+        if (this.logger) {
+          this.logger(`[jslib] 严格模式编译失败（${String(e && e.message).slice(0, 60)}），已按 var 降级注入 ${Object.keys(out2).length} 个全局`);
+        }
+        return out2;
+      } catch (_e2) {
+        this._jsLibFn = null;
+        this._jsLibState = 'fail';
+        this.errors.push(`jsLib 预编译失败：${e && e.message ? e.message : e}`);
+      }
     }
     return this._jsLibFn || {};
   }

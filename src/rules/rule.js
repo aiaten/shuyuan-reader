@@ -858,18 +858,60 @@ function resultFromState($, state, ctx) {
  *   `@js:` → `evalJS(rule, result)`；`$.x`/`@json:` → JSONPath；其余 → `result[rule]` 键值直取。
  */
 function pickItemField(item, rule, ctx) {
-  const s = String(rule == null ? '' : rule).trim();
-  if (!s || item == null) return '';
+  let s0 = String(rule == null ? '' : rule).trim();
+  if (!s0 || item == null) return '';
+  // `{{...}}` 模板展开（Legado：{{}} 先于规则求值，块内 JS 的 `$`/`result` = 当前条目）。
+  // 真实用例：书旗小说 8011 bookUrl = `@js:…bookId = "{{$.bookId||$.bid}}";…`
+  if (s0.includes('{{') && ctx && ctx.js) {
+    s0 = s0.replace(/\{\{([\s\S]*?)\}\}/g, (_m, code) => {
+      try {
+        const v = ctx.js.run(String(code).trim(), { result: item, $: item, ...ctx });
+        if (v == null) return '';
+        return typeof v === 'object' ? JSON.stringify(v) : String(v);
+      } catch (_) { return ''; }
+    });
+  }
+  // `||` 组合：依次尝试每个备选，首个非空即用（Legado 组合符语义）。
+  // 真实用例：长佩文学 8011 字段 `$.novel_name||$.name##<.*?>` —— 缺了这条路，
+  // 每个条目所有字段都解出空，搜索结果整批被丢。
+  // `@js:` / `<js>` 规则体内的 `||` 属于代码，不拆。
+  const alts = s0.includes('||') && !s0.startsWith('@js:') && !s0.startsWith('<js>')
+    ? s0.split('||')
+    : [s0];
+  for (const alt of alts) {
+    const v = pickItemFieldSingle(item, alt.trim(), ctx);
+    if (v !== '' && v != null) return v;
+  }
+  return '';
+}
+
+/** pickItemField 的单条路径（不含 `||` 组合） */
+function pickItemFieldSingle(item, s0, ctx) {
+  if (!s0 || item == null) return '';
+  // `##regex##replacement` 后缀：Legado 挂在【整条规则】上，键值直取 / JSONPath
+  // 路径同样适用（真实用例：搬山人 bookUrl = `$.slug##^(.+)$##https://…/novel/$1`）。
+  // `@js:` 规则体内的 `##` 属于代码，不拆。
+  let s = s0;
+  let rx = null;
+  if (s0.indexOf('##') >= 0 && !s0.startsWith('@js:') && !s0.startsWith('<js>')) {
+    const parts = s0.split('##');
+    s = parts[0].trim();
+    rx = parts.slice(1);
+  }
+  let v;
   if (s.startsWith('@js:') || s.startsWith('<js>')) {
     if (!ctx || !ctx.js) return '';
     const code = s.startsWith('@js:') ? s.slice(4) : s.replace(/^<js>/, '').replace(/<\/js>$/, '');
-    const v = ctx.js.runRaw ? ctx.js.runRaw(code, { result: item, ...ctx }) : ctx.js.run(code, { result: item, ...ctx });
-    return v == null ? '' : v;
+    v = ctx.js.runRaw ? ctx.js.runRaw(code, { result: item, ...ctx }) : ctx.js.run(code, { result: item, ...ctx });
+    v = v == null ? '' : v;
+  } else if (s.startsWith('$.') || s.startsWith('$[') || /^@json:/i.test(s)) {
+    try { v = jsonPath(JSON.stringify(item), s.replace(/^@json:/i, '')); } catch (_) { v = ''; }
+  } else {
+    v = item[s];
   }
-  if (s.startsWith('$.') || s.startsWith('$[') || /^@json:/i.test(s)) {
-    try { return jsonPath(JSON.stringify(item), s.replace(/^@json:/i, '')); } catch (_) { return ''; }
+  if (rx && rx.length >= 2) {
+    v = applyReplaceRegex(v == null ? '' : String(v), rx[0], rx[1] == null ? '' : rx[1], rx.length >= 3);
   }
-  const v = item[s];
   return v == null ? '' : v;
 }
 
@@ -918,9 +960,10 @@ function evalRuleCore(raw, $, ctx = {}, opts = {}) {
   if (m) {
     prefix = m[1].toLowerCase();
     body = raw.slice(m[0].length);
-  } else if (raw.startsWith('$.') || raw.startsWith('$[')) {
+  } else if (raw.startsWith('$.') || raw.startsWith('$[') || /^\.\[/.test(raw)) {
     // Legado 会把 `$.author` / `$[0].name` 这类规则自动当作 JSONPath。
-    // 真实书源里非 `@json:` 前缀的写法很常见：番茄小说 17 处、纸间 7 处。
+    // 真实书源里非 `@json:` 前缀的写法很常见：番茄小说 17 处、纸间 7 处；
+    // `.[?(@.k)]`（省略 $ 的过滤器写法）也有：书旗小说 8011。
     prefix = 'json';
     body = raw;
   }
@@ -968,8 +1011,20 @@ function evalRuleCore(raw, $, ctx = {}, opts = {}) {
   } else if (prefix === 'xpath') {
     state = { strings: xpathEval($, opts.root || $.root(), first) };
   } else if (prefix === 'json') {
-    const src = opts.result0 == null ? '' : String(opts.result0);
-    state = { strings: [jsonPath(src, first)] };
+    // JSON 规则的取值来源：显式 result0 > 页面原文（JSON API 响应走 search/content
+    // 时以原文本形式挂在 $.__srcHtml 上，此前没传 result0 时这里恒为空串，
+    // 导致 `$.model.data[*]` 这类 JSON API 书源全部解不出 —— 实测搬山人 8023）。
+    const src = opts.result0 != null ? String(opts.result0) : pageHtmlOf($);
+    const vals = jsonPathValues(src, first);
+    // 列表语义：匹配结果整体是「对象或对象数组」时按条目产出（对齐 Legado
+    // getElements 对 JSON 列表返回 List<Map>），引擎才能逐条取 name/bookUrl。
+    const objs = [];
+    for (const v of vals) {
+      if (Array.isArray(v)) { for (const x of v) if (x && typeof x === 'object') objs.push(x); }
+      else if (v && typeof v === 'object') objs.push(v);
+    }
+    if (objs.length) state = { items: objs };
+    else state = { strings: vals.map((v) => (v == null ? '' : typeof v === 'object' ? JSON.stringify(v) : String(v))) };
   } else if (first.trim() === '' && segs.length > 1) {
     // 以 @ 开头：直接对 root 做后续操作
     state = opts.root ? { elems: opts.root }
@@ -1157,18 +1212,38 @@ function xpathEval($, root, expr) {
   return out;
 }
 
-/** 极小 JSONPath：$.a.b[0].c、$.a[*].b、$.a、a.b */
-function jsonPath(jsonText, path) {
-  if (!jsonText) return '';
+/** 极小 JSONPath：$.a.b[0].c、$.a[*].b、$.a、a.b —— 求值核心，匹配值原样返回（对象不串化） */
+function jsonPathValues(jsonText, path) {
+  if (!jsonText) return [];
   let data;
-  try { data = typeof jsonText === 'string' ? JSON.parse(jsonText) : jsonText; } catch (_) { return ''; }
+  try { data = typeof jsonText === 'string' ? JSON.parse(jsonText) : jsonText; } catch (_) { return []; }
   let p = String(path).trim().replace(/^\$/, '').replace(/^\./, '');
-  if (!p) return typeof data === 'string' ? data : JSON.stringify(data);
+  if (!p) return Array.isArray(data) ? data : [data];
   const tokens = [];
-  for (const part of p.split('.')) {
+  // 括号感知的分段：'.' 只在括号外才是路径分隔符（`@.title`、`[?(@.a=='x.y')]`
+  // 里的点属于过滤器表达式，此前裸 split('.') 会把 `[?(@.title)]` 拆碎）
+  const parts = [];
+  {
+    let buf = '';
+    let depth = 0;
+    for (const ch of p) {
+      if (ch === '[') depth++;
+      else if (ch === ']') depth = Math.max(0, depth - 1);
+      if (ch === '.' && depth === 0) { parts.push(buf); buf = ''; }
+      else buf += ch;
+    }
+    if (buf) parts.push(buf);
+  }
+  for (const part of parts) {
     let rest = part;
+    // 过滤器 `[?(@.key)]` / `[?(@.key=='v')]`：对数组按条件筛（真实用例：书旗小说
+    // 8011 bookList = `.[?(@.bookName)]||.[?(@.title)]`）
+    for (const fm of rest.matchAll(/\[\?\(@\.([^\]!~=]+)(?:\s*([!~=]=?)\s*'?\"?([^'\"]*)'?\")?\)\]/g)) {
+      tokens.push({ t: 'filter', k: fm[1].trim(), op: fm[2] || '', v: fm[3] != null ? fm[3].replace(/["']/g, '') : '' });
+      rest = rest.replace(fm[0], '');
+    }
     const nameM = /^([^\[\]]*)/.exec(rest)[1];
-    if (nameM) tokens.push({ t: 'key', k: nameM });
+    if (nameM) tokens.push({ t: 'key', k: nameM }); // 空串（"[?(…)]" 开头的过滤器段）不产生 key token
     for (const mm of rest.matchAll(/\[([^\]]*)\]/g)) {
       const inner = mm[1].trim();
       if (inner === '*') tokens.push({ t: 'wild' });
@@ -1184,9 +1259,44 @@ function jsonPath(jsonText, path) {
       if (tk.t === 'key') { if (c[tk.k] !== undefined) next.push(c[tk.k]); }
       else if (tk.t === 'idx') { if (Array.isArray(c) && c[tk.i] !== undefined) next.push(c[tk.i]); }
       else if (tk.t === 'wild') { if (Array.isArray(c)) next.push(...c); else if (typeof c === 'object') next.push(...Object.values(c)); }
+      else if (tk.t === 'filter') {
+        const match = (it) => {
+          if (!it || typeof it !== 'object' || it[tk.k] == null) return false;
+          if (!tk.op) return true;
+          if (tk.op === '==') return String(it[tk.k]) === tk.v;
+          if (tk.op === '!=') return String(it[tk.k]) !== tk.v;
+          return false;
+        };
+        if (Array.isArray(c)) {
+          for (const it of c) if (match(it)) next.push(it);
+        } else if (typeof c === 'object') {
+          // 对象根上的过滤器：递归深扫所有嵌套数组（等价 Legado `$..[?(…)]` 递归下降，
+          // 真实用例：书旗小说 8011 bookList = `.[?(@.bookName)]`，books 藏在深层）
+          const stack = [c];
+          while (stack.length) {
+            const cur2 = stack.pop();
+            if (Array.isArray(cur2)) {
+              for (const it of cur2) {
+                if (match(it)) next.push(it);
+                else if (it && typeof it === 'object') stack.push(it);
+              }
+            } else if (cur2 && typeof cur2 === 'object') {
+              for (const v of Object.values(cur2)) {
+                if (v && typeof v === 'object') stack.push(v);
+              }
+            }
+          }
+        }
+      }
     }
     cur = next;
   }
+  return cur;
+}
+
+/** 极小 JSONPath：$.a.b[0].c、$.a[*].b、$.a、a.b（匹配值串化后按 \n 连接） */
+function jsonPath(jsonText, path) {
+  const cur = jsonPathValues(jsonText, path);
   if (cur.length === 0) return '';
   if (cur.length === 1) {
     const v = cur[0];
@@ -1226,7 +1336,7 @@ function isBadUrl(url) {
 
 module.exports = {
   splitTop, splitOp, firstComboOp, splitJsBlocks, translateSelector, looksLikeSelector, classifySegment,
-  evalRule, absUrl, isBadUrl, expandBraces, jsonPath, xpathEval, safeRegExp,
+  evalRule, absUrl, isBadUrl, expandBraces, jsonPath, jsonPathValues, xpathEval, safeRegExp,
   elemsToStrings, attrToStrings, findBylext, applyReplaceRegex,
   makeDomProxy, jsResultValue, stateFromJs, mergeResults, pickItemField, listTargets,
 };

@@ -12,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { probe, canAdd } = require('./probe');
+const { probe, canAdd, cleanSourceUrl } = require('./probe');
 
 /** 书源唯一键：优先 URL，其次名称 */
 function keyOf(s) {
@@ -133,6 +133,14 @@ class SourceStore {
    */
   async add(source, opts = {}) {
     if (opts.dataDir) this.dir = path.join(opts.dataDir, 'sources');
+    // bookSourceUrl 清洗：在线源里常见「https://xxx.com（作者备注）」这类带尾巴的写法，
+    // 直接落盘会让后续所有请求 DNS 失败。提取开头那段合法地址再校验/探测/入库。
+    if (source && typeof source === 'object' && source.bookSourceUrl) {
+      const cleaned = cleanSourceUrl(source.bookSourceUrl);
+      if (cleaned && cleaned !== source.bookSourceUrl && /^https?:\/\//i.test(cleaned)) {
+        source = { ...source, bookSourceUrl: cleaned };
+      }
+    }
     const shapeErrs = validateShape(source);
     if (shapeErrs.length) {
       return { added: false, reason: '书源结构校验失败', errors: shapeErrs };

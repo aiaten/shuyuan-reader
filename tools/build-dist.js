@@ -437,7 +437,8 @@ function main() {
   const zip = path.join(OUT_BASE, APP_NAME + '-' + PKG.version + '-win64.zip');
   fs.rmSync(zip, { force: true });
   // Windows 10+ 自带 bsdtar，用它压 zip（无需额外依赖）
-  execFileSync('tar.exe', ['-a', '-c', '-f', zip, '-C', OUT_BASE, path.basename(STAGE)], { stdio: 'inherit' });
+  // --force-local：Windows bsdtar 会把 "-C C:\..." 里的 C: 误判为远程主机名
+  execFileSync('tar.exe', ['--force-local', '-a', '-c', '-f', zip, '-C', OUT_BASE, path.basename(STAGE)], { stdio: 'inherit' });
 
   if (!KEEP) fs.rmSync(STAGE, { recursive: true, force: true });
   log('');
