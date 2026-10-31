@@ -34,6 +34,8 @@
         <span class="hint" id="shelfCheckHint" hidden></span>
         <button class="btn" id="btnGoDownloads" title="查看下载任务与进度">⇩ 下载</button>
         <button class="btn" id="btnExportShelf">导出全部为 TXT</button>
+        <button class="btn" id="btnBackupShelf" title="备份书架（含阅读进度与目录）+ 书源 + 订阅源到一个 JSON 文件（不含正文）">💾 备份</button>
+        <button class="btn" id="btnRestoreShelf" title="从备份文件恢复书架 / 书源 / 订阅源（只增不删，不会清空现有数据）">↩ 恢复</button>
         <span class="spacer"></span>
         <select class="input select" id="shelfSort" title="排序方式">
           <option value="added">按加入时间</option>
@@ -92,6 +94,8 @@
         <button class="btn" id="btnRefreshSources">刷新</button>
         <button class="btn" id="btnImportSources">导入 JSON</button>
         <button class="btn" id="btnExportSources">导出本地书源</button>
+        <button class="btn" id="btnBackupSources" title="把全部书源 + 订阅源打包成一个 JSON 备份文件">💾 备份</button>
+        <button class="btn" id="btnRestoreSources" title="从备份文件恢复书源 / 订阅源（只增不删）">↩ 恢复</button>
         <button class="btn" id="btnAddSource">手动添加</button>
         <span class="spacer"></span>
         <span class="hint" id="sourceStats"></span>

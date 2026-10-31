@@ -23,6 +23,8 @@
  *   read <bookId> [章节序号] [--chars N]   打印章节正文
  *   export <bookId|--all> [--layout single|chapter|volume] [--encoding utf-8|gbk]
  *                        [--out DIR] [--no-toc] [--lf]
+ *   backup [--out f.json] [--sources-only]      备份书源+订阅源+书架（不含正文）
+ *   restore <f.json> [--force]                  恢复备份（只增不删）
  *   help
  */
 
@@ -130,6 +132,13 @@ const HELP = `书源阅读器 CLI
   export <bookId|--all> [--layout single|chapter|volume] [--encoding utf-8|gbk]
                         [--out 目录] [--no-toc] [--no-header] [--lf] [--bom]
 
+备份 / 恢复（书源 + 订阅源 + 书架/进度/目录，不含正文）
+  backup [--out 文件.json] [--sources-only] [--no-toc] [--no-progress]
+                                                         生成备份文件
+  restore <备份.json> [--force] [--sources-only|--books-only]
+                                                         恢复备份（只增不删；
+                                                         --force 覆盖同名书源/订阅源）
+
 其它
   info      数据目录与统计
   help      本帮助
@@ -144,6 +153,50 @@ async function cmdInfo(app) {
   console.log('数据目录: ' + i.dataDir);
   console.log(`书源    : 共 ${i.sources.total} 个，已探测 ${i.sources.probed}，通过 ${i.sources.passed}`);
   console.log(`书架    : 共 ${i.books} 本，已下载 ${i.chapters} 章`);
+}
+
+/**
+ * 备份：把书源 + 订阅源 + 书架（进度/目录）打包成 JSON。
+ * 用法: backup [--out 文件.json] [--sources-only] [--no-toc] [--no-progress]
+ */
+async function cmdBackup(app, { flags }) {
+  const scope = flags['sources-only'] ? 'sources' : 'all';
+  const r = app.createBackup({
+    scope,
+    includeToc: !flags['no-toc'],
+    includeProgress: !flags['no-progress'],
+  });
+  const out = flags.out || r.filename;
+  fs.writeFileSync(out, r.text, 'utf8');
+  console.log(`备份完成 → ${out}`);
+  console.log(`  书源 ${r.counts.sources} · 订阅源 ${r.counts.rss} · 书架 ${r.counts.books}（不含正文）`);
+}
+
+/** 恢复：backup 生成的 JSON，或老式裸书源数组 */
+async function cmdRestore(app, { pos, flags }) {
+  const file = pos[0];
+  if (!file) throw new Error('用法: restore <备份.json> [--force] [--sources-only]');
+  const text = fs.readFileSync(file, 'utf8');
+  const info = app.inspectBackup(text);
+  console.log(
+    `备份时间 ${info.createdAt ? new Date(info.createdAt).toLocaleString() : '未知'} · ` +
+      `书源 ${info.counts.sources} · 订阅源 ${info.counts.rss} · 书架 ${info.counts.books}`
+  );
+  const r = await app.restoreBackup(text, {
+    force: !!flags.force,
+    sources: !flags['books-only'],
+    rss: !flags['books-only'],
+    books: !flags['sources-only'],
+  });
+  console.log(
+    `书源    : 新增 ${r.sources.added}，更新 ${r.sources.updated}，跳过 ${r.sources.skipped}` +
+      (r.sources.failed ? `，失败 ${r.sources.failed}` : '')
+  );
+  console.log(`订阅源  : 新增 ${r.rss.added}，更新 ${r.rss.updated}，跳过 ${r.rss.skipped}`);
+  console.log(
+    `书架    : 新增 ${r.books.added}，已存在 ${r.books.updated}，目录恢复 ${r.books.tocRestored}，进度恢复 ${r.books.progressRestored}`
+  );
+  for (const w of r.books.warnings || []) console.log('  ! ' + w);
 }
 
 async function cmdOnline(app, { pos, flags }) {
@@ -646,6 +699,12 @@ async function main() {
       break;
     case 'export':
       await cmdExport(app, { pos, flags });
+      break;
+    case 'backup':
+      await cmdBackup(app, { pos, flags });
+      break;
+    case 'restore':
+      await cmdRestore(app, { pos, flags });
       break;
     default:
       console.error(`未知命令: ${cmd}\n`);

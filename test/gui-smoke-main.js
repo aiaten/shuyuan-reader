@@ -133,6 +133,10 @@ const PROBE = `(async () => {
     for (const sel of ['#shelfList', '#sourceList', '#onlineList', '#searchList', '#modalMask', '#busy', '#toastWrap']) {
       r.caps[sel] = !!document.querySelector(sel);
     }
+    // 备份入口：书架页与书源页各一对「备份 / 恢复」按钮
+    for (const sel of ['#btnBackupShelf', '#btnRestoreShelf', '#btnBackupSources', '#btnRestoreSources']) {
+      r.caps[sel] = !!document.querySelector(sel);
+    }
 
     // ---- 功能性检查：可读性探测闸门（交付点③）----
     // 0) 在线列表标红（m04946）必须在探测闸门之前断言：GUI 自写源与 seed 植入的是同一个 URL
@@ -832,6 +836,32 @@ const PROBE = `(async () => {
     }
     seg('afterSo');
 
+    // ---- 备份 / 恢复（书架页 + 书源页，走真实 IPC 往返）----
+    try {
+      const b = { ui: {}, api: {} };
+      b.ui.shelf = ['#btnBackupShelf', '#btnRestoreShelf'].every((s) => !!document.querySelector(s));
+      b.ui.sources = ['#btnBackupSources', '#btnRestoreSources'].every((s) => !!document.querySelector(s));
+      const made = await window.api.createBackup({ scope: 'all' });
+      b.api.counts = made.counts;
+      b.api.filename = made.filename;
+      b.api.kb = Math.round(made.text.length / 1024);
+      // 注意：PROBE 是以字符串形式送进渲染进程的，这里不要用带 \s 的正则
+      // （模板串里 \s 会退化成 s），一律用 indexOf 判断。
+      b.api.hasFormat = made.text.indexOf('"format": "shuyuan-reader-backup"') >= 0;
+      b.api.noChapterBody = made.text.indexOf('"chapters"') < 0; // 备份不含正文
+      const info = await window.api.inspectBackup(made.text);
+      b.api.inspect = info.counts;
+      const rs = await window.api.restoreBackup(made.text, {});
+      b.api.restore = { sources: rs.sources, rss: rs.rss, books: rs.books };
+      // 老式裸书源数组（没有 format 字段）也要能预览
+      const legacy = await window.api.inspectBackup(JSON.stringify([{ bookSourceName: 'X', bookSourceUrl: 'https://x.example.com' }]));
+      b.api.legacy = { legacy: legacy.legacy, sources: legacy.counts.sources };
+      r.func.bk = b;
+    } catch (e) {
+      r.func.bk = { err: String(e.message).slice(0, 160) };
+    }
+    seg('afterBackup');
+
     r.errors = errors;
     seg('end');
     r.title = document.title;
@@ -1082,6 +1112,7 @@ app.whenReady().then(async () => {
     'searchOne', 'searchAll',
     'shelf', 'book', 'removeBook', 'toc', 'addToShelf', 'download', 'chapter', 'progress', 'saveProgress',
     'exportBook', 'exportShelf', 'exportDefaults',
+    'createBackup', 'inspectBackup', 'restoreBackup',
     'pickFiles', 'saveFile', 'pickDir', 'showInFolder', 'openExternal',
   ];
   for (const k of need) checks.push([`api.${k}`, res.apiKeys.includes(k)]);
@@ -1091,6 +1122,27 @@ app.whenReady().then(async () => {
   checks.push(['onlineList 首条名称正确', !!(res.online && /最终小说网/.test(res.online.first || ''))]);
   for (const v of res.views || []) checks.push([`视图 ${v.view} 可切换`, v.active]);
   for (const [sel, ok] of Object.entries(res.caps || {})) checks.push([`DOM ${sel}`, ok]);
+
+  // ---- 备份 / 恢复（书架页 + 书源页）----
+  const bk = res.func && res.func.bk ? res.func.bk : {};
+  const bkApi = bk.api || {};
+  checks.push(['备份：页面按钮齐全（书架页 + 书源页）', !!(bk.ui && bk.ui.shelf && bk.ui.sources)]);
+  checks.push([
+    '备份：生成成功并带统计',
+    !!(bkApi.counts && typeof bkApi.counts.sources === 'number' && typeof bkApi.counts.books === 'number'),
+  ]);
+  checks.push(['备份：文件名形如 shuyuan-backup-*.json', /^shuyuan-backup-\d{8}-\d{4}\.json$/.test(bkApi.filename || '')]);
+  checks.push(['备份：格式标识正确', bkApi.hasFormat === true]);
+  checks.push(['备份：不含章节正文', bkApi.noChapterBody === true]);
+  checks.push([
+    '备份：预览统计与生成时一致',
+    !!bkApi.counts && JSON.stringify(bkApi.counts) === JSON.stringify(bkApi.inspect),
+  ]);
+  checks.push([
+    '备份：恢复返回书源/订阅源/书架三段统计',
+    !!(bkApi.restore && bkApi.restore.sources && bkApi.restore.rss && bkApi.restore.books),
+  ]);
+  checks.push(['备份：识别老式裸书源数组', !!(bkApi.legacy && bkApi.legacy.legacy && bkApi.legacy.sources === 1)]);
   checks.push(['页面标题', res.title === '书源阅读器']);
   // 只把渲染进程的 error 级别（L3）与 render-process-gone 视为 JS 错误；L0/L1/L2 是 log/warn
   const hardErrors = consoleErrors.filter((m) => /^\[L3\]/.test(m) || m.startsWith('[render-process-gone]'));

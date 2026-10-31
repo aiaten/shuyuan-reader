@@ -1167,6 +1167,111 @@ $('#btnExportShelf').onclick = async () => {
   });
 };
 
+/* ==================== 备份 / 恢复（书架页与书源页共用） ====================
+ * 备份范围：
+ *   scope='all'     书架（含阅读进度与目录）+ 书源 + 订阅源 —— 书架页的「备份」
+ *   scope='sources' 书源 + 订阅源                        —— 书源页的「备份」
+ * 两份都是同一个 JSON 格式（src/backup.js），所以书源页也能恢复整机备份，
+ * 只是默认只勾选书源那部分，避免误操作把别人书架的书塞进来。
+ * 不含章节正文（体积大，用「导出 TXT」）。 */
+
+async function doBackup(scope) {
+  const r = await run('生成备份…', () =>
+    window.api.createBackup({ scope, includeToc: true, includeProgress: true })
+  );
+  if (!r) return;
+  const saved = await window.api.saveFile(r.filename, r.text, { title: '保存备份文件' });
+  if (saved.canceled) return;
+  const parts = [`书源 ${r.counts.sources}`, `订阅源 ${r.counts.rss}`];
+  if (r.counts.books) parts.push(`书架 ${r.counts.books}`);
+  toast(`备份已保存：${parts.join(' · ')}`, 'ok');
+}
+
+async function doRestore(page) {
+  const pick = await window.api.pickFiles({
+    title: '选择备份文件',
+    filters: [{ name: '备份 JSON', extensions: ['json'] }],
+  });
+  if (pick.canceled || !pick.files.length) return;
+  const file = pick.files[0];
+  const info = await run('读取备份…', () => window.api.inspectBackup(file.text));
+  if (!info) return;
+
+  const c = info.counts;
+  const when = info.createdAt ? new Date(info.createdAt).toLocaleString() : '未知时间';
+  const hasSources = c.sources > 0;
+  const hasRss = c.rss > 0;
+  const hasBooks = c.books > 0;
+  if (!hasSources && !hasRss && !hasBooks) return toast('这个备份文件里没有可恢复的内容', 'err');
+
+  const checked = (on) => (on ? 'checked' : '');
+  modal({
+    title: '恢复备份',
+    body: `
+      <p style="margin-top:0">文件：<b>${esc(file.name)}</b><br/>
+        <span class="hint">备份时间：${esc(when)}${info.legacy ? ' · 旧版书源文件' : ''}</span></p>
+      <p style="margin:14px 0 6px">选择要恢复的内容：</p>
+      <label class="check"><input type="checkbox" id="rsSources" ${checked(hasSources)} ${hasSources ? '' : 'disabled'}/> 书源（${c.sources} 个）</label><br/>
+      <label class="check"><input type="checkbox" id="rsRss" ${checked(hasRss)} ${hasRss ? '' : 'disabled'}/> 订阅源（${c.rss} 个）</label><br/>
+      <label class="check"><input type="checkbox" id="rsBooks" ${checked(hasBooks && page === 'shelf')} ${hasBooks ? '' : 'disabled'}/> 书架与阅读进度（${c.books} 本）</label><br/>
+      <label class="check" style="margin-top:10px"><input type="checkbox" id="rsForce"/> 覆盖已存在的同名书源 / 订阅源</label>
+      <p class="hint" style="margin-top:10px">恢复只增不删：不会清空现有书源或书架。已存在的书只补元信息，本地已有的目录和阅读进度不会被旧备份覆盖。</p>`,
+    buttons: [
+      { text: '取消', onClick: closeModal },
+      {
+        text: '开始恢复',
+        class: 'primary',
+        onClick: async () => {
+          const opts = {
+            sources: $('#rsSources').checked,
+            rss: $('#rsRss').checked,
+            books: $('#rsBooks').checked,
+            force: $('#rsForce').checked,
+            progress: true,
+            toc: true,
+          };
+          closeModal();
+          const r = await run('恢复中…', () => window.api.restoreBackup(file.text, opts));
+          if (!r) return;
+          await loadShelf();
+          await loadSources();
+
+          const lines = [];
+          if (opts.sources && hasSources) {
+            lines.push(
+              `书源：新增 ${r.sources.added} · 更新 ${r.sources.updated} · 跳过 ${r.sources.skipped}` +
+                (r.sources.failed ? ` · 失败 ${r.sources.failed}` : '')
+            );
+          }
+          if (opts.rss && hasRss) {
+            lines.push(`订阅源：新增 ${r.rss.added} · 更新 ${r.rss.updated} · 跳过 ${r.rss.skipped}`);
+          }
+          if (opts.books && hasBooks) {
+            lines.push(
+              `书架：新增 ${r.books.added} 本 · 已存在 ${r.books.updated} 本 · 目录恢复 ${r.books.tocRestored} · 进度恢复 ${r.books.progressRestored}`
+            );
+          }
+          modal({
+            title: '恢复完成',
+            body:
+              `<div style="line-height:2">${lines.length ? lines.map(esc).join('<br/>') : '<span class="hint">没有勾选任何内容</span>'}</div>` +
+              (r.books.warnings && r.books.warnings.length
+                ? `<div class="card-sub" style="margin-top:12px">${r.books.warnings.map(esc).join('<br/>')}</div>`
+                : ''),
+            buttons: [{ text: '好', class: 'primary', onClick: closeModal }],
+          });
+          toast('恢复完成', 'ok');
+        },
+      },
+    ],
+  });
+}
+
+$('#btnBackupShelf').onclick = () => doBackup('all');
+$('#btnRestoreShelf').onclick = () => doRestore('shelf');
+$('#btnBackupSources').onclick = () => doBackup('sources');
+$('#btnRestoreSources').onclick = () => doRestore('sources');
+
 /** 下载对话框：章节范围 + 强制重下 */
 function downloadDialog(book) {
   const total = book.chapterCount || 0;

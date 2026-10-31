@@ -111,9 +111,16 @@ contextBridge.exposeInMainWorld('api', {
   exportShelf: (opts) => call('export:shelf', opts),
   exportDefaults: () => call('export:defaults'),
 
+  /* 备份 / 恢复（书源页、书架页共用）
+   * createBackup({scope:'all'|'sources'}) → {filename, counts, text}
+   * inspectBackup(text) → 只读预览；restoreBackup(text, opts) → 各部分的统计 */
+  createBackup: (opts) => call('backup:create', opts || {}),
+  inspectBackup: (text) => call('backup:inspect', text),
+  restoreBackup: (text, opts) => call('backup:restore', text, opts || {}),
+
   /* 系统 */
-  pickFiles: () => call('dialog:openFile'),
-  saveFile: (name, content) => call('dialog:saveFile', name, content),
+  pickFiles: (opts) => call('dialog:openFile', opts || {}),
+  saveFile: (name, content, opts) => call('dialog:saveFile', name, content, opts || {}),
   pickDir: () => call('dialog:pickDir'),
   showInFolder: (p) => call('shell:showItem', p),
   openExternal: (url) => call('shell:openExternal', url),

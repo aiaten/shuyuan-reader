@@ -32,6 +32,7 @@ const TESTS = [
   { layer: 'unit', file: 'unit-library.js', desc: '本地书架读写与原子落盘' },
   { layer: 'unit', file: 'unit-store.js', desc: '书源库 key 归一化 / BOM 导入 / 结构校验' },
   { layer: 'unit', file: 'unit-rss.js', desc: '订阅源库（Legado RSS）结构与增删改' },
+  { layer: 'unit', file: 'unit-backup.js', desc: '备份/恢复（书源+订阅源+书架/进度/目录、合并语义、只增不删）' },
   { layer: 'unit', file: 'unit-yck.js', desc: '在线书源列表 HTML 解析 + 备用线路故障转移' },
   { layer: 'unit', file: 'unit-searchall.js', desc: '全书源聚合搜索（并发/增量/熔断/去重/源排序）' },
   { layer: 'unit', file: 'unit-prefetch.js', desc: '预取循环与搜索并发回归（并发不累加 / 预算到点收工 / 缓存键一致）' },

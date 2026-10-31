@@ -278,11 +278,16 @@ function registerIpc() {
   handle('export:shelf', (a, opts) => a.exportShelf(opts || {}));
   handle('export:defaults', () => App.exportDefaults());
 
+  /* 备份 / 恢复（书源页、书架页共用） */
+  handle('backup:create', (a, opts) => a.createBackup(opts || {}));
+  handle('backup:inspect', (a, text) => a.inspectBackup(text));
+  handle('backup:restore', (a, text, opts) => a.restoreBackup(text, opts || {}));
+
   /* 系统交互 */
-  handle('dialog:openFile', async () => {
+  handle('dialog:openFile', async (_a, opts = {}) => {
     const r = await dialog.showOpenDialog(win, {
-      title: '选择书源 JSON 文件',
-      filters: [{ name: '书源 JSON', extensions: ['json', 'txt'] }],
+      title: opts.title || '选择书源 JSON 文件',
+      filters: opts.filters || [{ name: '书源 JSON', extensions: ['json', 'txt'] }],
       properties: ['openFile', 'multiSelections'],
     });
     if (r.canceled || !r.filePaths.length) return { canceled: true, files: [] };
@@ -293,11 +298,11 @@ function registerIpc() {
     };
   });
 
-  handle('dialog:saveFile', async (_a, defaultName, content) => {
+  handle('dialog:saveFile', async (_a, defaultName, content, opts = {}) => {
     const r = await dialog.showSaveDialog(win, {
-      title: '导出书源',
+      title: opts.title || '导出书源',
       defaultPath: defaultName || 'sources.json',
-      filters: [{ name: 'JSON', extensions: ['json'] }],
+      filters: opts.filters || [{ name: 'JSON', extensions: ['json'] }],
     });
     if (r.canceled || !r.filePath) return { canceled: true };
     require('fs').writeFileSync(r.filePath, content, 'utf8');

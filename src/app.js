@@ -19,6 +19,7 @@ const { Downloader } = require('./store/downloader');
 const { DownloadQueue } = require('./store/download-queue');
 const { checkShelfUpdates, checkBook: checkBookUpdate } = require('./store/updater');
 const { exportTxt, exportLibrary, normalizeOptions, DEFAULTS } = require('./export/txt');
+const backup = require('./backup');
 
 /** 数据根目录：环境变量 SHUYUAN_DATA > <项目根>/data */
 function resolveDataDir(explicit) {
@@ -1301,8 +1302,38 @@ class App {
     });
   }
 
-  static exportDefaults() {
-    return { ...DEFAULTS };
+  /* ==================== 备份 / 恢复 ==================== */
+
+  /**
+   * 生成备份文本（书源 + 订阅源 + 书架/进度/目录，不含正文）。
+   * @param {object} [opts] { scope: 'all'|'sources', includeToc, includeProgress }
+   * @returns {{filename:string, scope:string, counts:object, text:string}}
+   */
+  createBackup(opts = {}) {
+    const payload = backup.create(this, opts);
+    return {
+      filename: backup.defaultName(),
+      scope: payload.scope,
+      counts: payload.counts,
+      text: backup.serialize(payload),
+    };
+  }
+
+  /** 只读预览备份内容（界面确认弹窗用，不落盘） */
+  inspectBackup(text) {
+    return backup.inspect(text);
+  }
+
+  /**
+   * 恢复备份（只增不删；已存在的书源/订阅源默认跳过，opts.force 才覆盖）。
+   * @param {string} text
+   * @param {object} [opts] { force, sources, rss, books, progress, toc }
+   */
+  async restoreBackup(text, opts = {}) {
+    return backup.restore(this, text, opts);
+  }
+
+  static exportDefaults() {    return { ...DEFAULTS };
   }
 
   static normalizeOptions(o) {
