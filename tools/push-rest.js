@@ -25,8 +25,9 @@ if (!repo || !branch || !parentSha || !message) {
   console.error('用法: GH_TOKEN=<token> node tools/push-rest.js <owner/repo> <branch> <父sha> "<msg>" [manifest.json]');
   process.exit(2);
 }
-const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN;
-if (!TOKEN) { console.error('缺少 GH_TOKEN 环境变量'); process.exit(2); }
+const TOKEN = process.env.GH_TOKEN || process.env.GITHUB_TOKEN
+  || (fs.existsSync(path.join(__dirname, '.gh-token')) ? fs.readFileSync(path.join(__dirname, '.gh-token'), 'utf8').trim() : '');
+if (!TOKEN) { console.error('缺少 token（GH_TOKEN 环境变量或 tools/.gh-token 文件）'); process.exit(2); }
 
 const API = 'https://api.github.com';
 async function api(method, url, body) {
