@@ -8,6 +8,17 @@
 // 校验：打印的 new tree 若等于 `git rev-parse HEAD^{tree}`，说明远端与本地逐字节一致。
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
+
+// 优先读 git 仓库中的规范 blob（autocrlf 下与 `git rev-parse HEAD^{tree}` 精确一致），
+// 不在 git 仓库内时回退工作区文件
+function readContent(abs, relPath) {
+  try {
+    return execFileSync('git', ['cat-file', 'blob', `HEAD:${relPath.replace(/\\/g, '/')}`], { maxBuffer: 512 * 1024 * 1024 });
+  } catch (_) {
+    return fs.readFileSync(abs);
+  }
+}
 
 const [repo, branch, parentSha, message, manifestPath] = process.argv.slice(2);
 if (!repo || !branch || !parentSha || !message) {
@@ -57,10 +68,10 @@ async function api(method, url, body) {
   for (const [remotePath, localPath] of pairs) {
     const abs = path.isAbsolute(localPath) ? localPath : path.resolve(__dirname, '..', localPath);
     if (!fs.existsSync(abs)) { console.error(`本地文件不存在: ${abs}`); process.exit(1); }
-    const content = fs.readFileSync(abs).toString('base64');
+    const content = readContent(abs, localPath).toString('base64');
     const blob = await api('POST', `/repos/${repo}/git/blobs`, { encoding: 'base64', content });
     treeEntries.push({ path: remotePath, mode: '100644', type: 'blob', sha: blob.sha });
-    console.log(`  ${known.has(remotePath) ? '[覆盖]' : '[新增]'} ${remotePath}  ${fs.statSync(abs).size}B  blob=${blob.sha.slice(0, 8)}`);
+    console.log(`  ${known.has(remotePath) ? '[覆盖]' : '[新增]'} ${remotePath}  ${content.length}B  blob=${blob.sha.slice(0, 8)}`);
   }
 
   // 3. 建新树
