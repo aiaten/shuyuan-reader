@@ -33,6 +33,7 @@
  */
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
 
@@ -49,7 +50,7 @@ const WITH_ELECTRON = process.argv.includes('--with-electron');
 // src/util/electron-exe.js 的 ensureElectronCached 复制到程序目录的 .electron-runtime\。
 // 为什么不直接放展开后的 270MB：
 //   1) 启动器/脚本只需要一个纯 ASCII 的可执行路径，副本最终都要复制一次，多放一份纯属浪费磁盘；
-//   2) zip 走 tar.exe 存储（不压缩），未展开的 dist 和展开的 dist 一样大，但少一次解压等待。
+//   2) zip 用存储模式（不压缩），未展开的 dist 和展开的 dist 一样大，但少一次解压等待。
 const DIST_ELECTRON = !process.argv.includes('--no-electron');
 
 function log(...a) { console.log(...a); }
@@ -436,9 +437,30 @@ function main() {
   log('打包…');
   const zip = path.join(OUT_BASE, APP_NAME + '-' + PKG.version + '-win64.zip');
   fs.rmSync(zip, { force: true });
-  // Windows 10+ 自带 bsdtar，用它压 zip（无需额外依赖）
-  // --force-local：Windows bsdtar 会把 "-C C:\..." 里的 C: 误判为远程主机名
-  execFileSync('tar.exe', ['--force-local', '-a', '-c', '-f', zip, '-C', OUT_BASE, path.basename(STAGE)], { stdio: 'inherit' });
+  /**
+   * 打真 zip（存储模式，不压缩）。
+   *
+   * 以前用 `tar.exe -a -c -f xxx.zip`：Windows 自带的 bsdtar **只有解压 zip 的能力，
+   * 不支持写 zip**，于是 -a 静默退化成写 tar —— 产物扩展名是 .zip、内容其实是 tar，
+   * 资源管理器双击打不开（朋友拿到会以为文件坏了）。改用 Python 的 zipfile，
+   * 和 make-icon.py 一样只依赖打包机上的 python，ZIP_STORED 存储模式几秒就能出包。
+   */
+  const py = `
+import os, sys, zipfile
+stage, out_dir, base = sys.argv[1], sys.argv[2], sys.argv[3]
+out = os.path.join(out_dir, base + '-win64.zip')
+with zipfile.ZipFile(out, 'w', zipfile.ZIP_STORED, allowZip64=True) as z:
+    for root, dirs, files in os.walk(stage):
+        for f in files:
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, os.path.dirname(stage))
+            z.write(full, rel)
+print('zip bytes', os.path.getsize(out))
+`;
+  const pyFile = path.join(os.tmpdir(), 'shuyuan-build-zip.py');
+  fs.writeFileSync(pyFile, py, 'utf8');
+  execFileSync('python', [pyFile, STAGE, OUT_BASE, path.basename(STAGE)], { stdio: 'inherit' });
+  fs.rmSync(pyFile, { force: true });
 
   if (!KEEP) fs.rmSync(STAGE, { recursive: true, force: true });
   log('');
