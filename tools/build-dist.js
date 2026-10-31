@@ -462,7 +462,15 @@ print('zip bytes', os.path.getsize(out))
   execFileSync('python', [pyFile, STAGE, OUT_BASE, path.basename(STAGE)], { stdio: 'inherit' });
   fs.rmSync(pyFile, { force: true });
 
-  if (!KEEP) fs.rmSync(STAGE, { recursive: true, force: true });
+  // 清理暂存目录只是收尾动作：某些环境（如带批量删除保护的宿主）会拦下上千个文件的
+  // 递归删除并抛错，此时 zip 已经写好了，不该让整次打包看起来失败。
+  if (!KEEP) {
+    try {
+      fs.rmSync(STAGE, { recursive: true, force: true });
+    } catch (e) {
+      log('! 暂存目录没能自动清理（' + (e && e.code || 'ERROR') + '），可手动删除：' + STAGE);
+    }
+  }
   log('');
   log('✓ 完成：' + zip + '（' + (fs.statSync(zip).size / 1048576).toFixed(1) + 'MB）');
 }
