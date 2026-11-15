@@ -4,6 +4,7 @@
  * 所有业务逻辑都在 src/ 里，本文件只做窗口管理与 IPC 转发。
  */
 
+const fs = require('fs');
 const path = require('path');
 const { app, BrowserWindow, ipcMain, dialog, shell, Menu, webContents } = require('electron');
 
