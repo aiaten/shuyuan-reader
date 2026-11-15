@@ -14,6 +14,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const NON_ASCII = /[^\x00-\x7F]/;
 
@@ -87,7 +88,38 @@ function chooseCacheRoot(candidates) {
 }
 
 /**
- * 把目录整体复制（Node 16.7+ 的 cpSync）。
+ * 用系统自带的复制工具复制目录（Windows: robocopy → xcopy；POSIX: cp -a）。
+ *
+ * 为什么不用 fs.cpSync：实测（Win10/11，Node 22）cpSync 复制含上千文件的
+ * electron dist 目录时会直接段错误（0xC0000005），且无法 try/catch ——
+ * 进程当场死掉，绿色版首次启动就表现为「启动失败（退出码 -1073741819）」。
+ * 系统原生工具（robocopy/xcopy/cp）做同样的事完全稳定，且对大目录更快。
+ */
+function copyDirExternal(src, dst) {
+  if (process.platform === 'win32') {
+    // robocopy 退出码 0-7 都算成功（1 = 有文件被复制），>= 8 才是失败；
+    // execFileSync 对非零退出码会抛异常，所以不能只靠 try/catch 判断。
+    try {
+      execFileSync(
+        'robocopy',
+        [src, dst, '/E', '/NFL', '/NDL', '/NJH', '/NJS', '/NP', '/R:2', '/W:1'],
+        { stdio: 'ignore', windowsHide: true }
+      );
+      return;
+    } catch (e) {
+      const code = e && typeof e.status === 'number' ? e.status : -1;
+      if (code >= 0 && code < 8) return; // robocopy 的「成功」码
+      // robocopy 不可用（被杀软拦/不存在等）才退 xcopy
+      execFileSync('xcopy', [src, dst, '/E', '/I', '/Y', '/Q'], { stdio: 'ignore', windowsHide: true });
+      return;
+    }
+  }
+  fs.mkdirSync(dst, { recursive: true });
+  execFileSync('cp', ['-a', path.join(src, '.'), dst], { stdio: 'ignore' });
+}
+
+/**
+ * 把目录整体复制。
  *
  * 旧副本的删除要容忍失败：上一次 Electron 还没退干净时文件是锁着的，
  * 直接 rmSync 会抛 EPERM 让整个启动挂掉。删不掉就换个新目录名（带时间戳），
@@ -99,7 +131,7 @@ function copyDir(src, dst) {
   }
   fs.rmSync(dst, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
   fs.mkdirSync(path.dirname(dst), { recursive: true });
-  fs.cpSync(src, dst, { recursive: true });
+  copyDirExternal(src, dst);
   return dst;
 }
 
