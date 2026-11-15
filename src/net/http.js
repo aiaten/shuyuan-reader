@@ -137,8 +137,18 @@ function request(url, options = {}) {
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       'Accept-Encoding': 'gzip, deflate, br',
       Connection: 'keep-alive',
-      ...headers,
     };
+    // 调用方/书源头按大小写不敏感覆盖默认值：HTTP 头本来就大小写不敏感，
+    // 书源里写 `user-agent`（小写）时若直接展开，会同时发出两条 UA，
+    // 有些站会因此判定异常请求。
+    for (const [k, v] of Object.entries(headers || {})) {
+      if (v == null) continue;
+      const lower = k.toLowerCase();
+      for (const existed of Object.keys(finalHeaders)) {
+        if (existed !== k && existed.toLowerCase() === lower) delete finalHeaders[existed];
+      }
+      finalHeaders[k] = v;
+    }
     if (!finalHeaders['User-Agent']) finalHeaders['User-Agent'] = DEFAULT_UA;
 
     const cookieStr = jar ? jar.getCookieHeader(url) : '';

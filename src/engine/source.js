@@ -70,16 +70,38 @@ function loadDoc(html) {
   return $;
 }
 
-/** 书源 header 字段是 JSON 字符串 */
+/**
+ * 解析书源 `header` 字段。
+ *
+ * 标准写法是 JSON 对象字符串（`{"User-Agent":"…"}`），但线上书源里存在大量
+ * **纯文本行**写法（`User-Agent: Mozilla/5.0 (Linux; Android 14) …`），yck 上
+ * 实测不少（例如 8108 🌈土豆小说网）。这种写法若按 JSON 解析失败就被整段丢掉，
+ * 于是请求回落到默认的桌面 UA —— 而这类站按 UA 分流，桌面 UA 直接 403，
+ * 探测就会把一本好看的书源判成「搜索规则不可用」而拒绝添加。
+ * 所以 JSON 解析失败时再按「每行一个 `Key: Value`」兜一层。
+ */
 function parseHeader(header) {
   if (!header) return {};
   if (typeof header === 'object') return { ...header };
+  const raw = String(header).trim();
+  if (!raw) return {};
   try {
-    const h = JSON.parse(header);
+    const h = JSON.parse(raw);
     return h && typeof h === 'object' ? h : {};
   } catch (_) {
-    return {};
+    /* 不是 JSON，按纯文本行解析 */
   }
+  const out = {};
+  for (const line of raw.split(/\r?\n/)) {
+    const s = line.trim().replace(/[,;]+$/, '');
+    if (!s) continue;
+    const i = s.indexOf(':');
+    if (i <= 0) continue;
+    const k = s.slice(0, i).trim();
+    const v = s.slice(i + 1).trim();
+    if (k && v) out[k] = v;
+  }
+  return out;
 }
 
 /* ------------------------------------------------------------------ *

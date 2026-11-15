@@ -37,7 +37,14 @@ try {
 console.log(`electron: ${resolved.exe}`);
 if (resolved.copied) console.log(`  （原路径含非 ASCII，已复制一份到纯 ASCII 路径：${resolved.original}）`);
 
-const child = spawn(resolved.exe, [path.join(__dirname, 'gui-smoke-main.js')], {
+// 额外的 Chromium 开关（空格分隔）。受限环境 / CI 里 Chromium 自建沙箱会被拒，
+// 表现为启动瞬间退出（0x80000003 / exit=3）且没有结果文件，此时需要：
+//   SHUYUAN_ELECTRON_ARGS=--no-sandbox node test/gui-smoke.js
+const extraArgs = String(process.env.SHUYUAN_ELECTRON_ARGS || '')
+  .split(/\s+/)
+  .filter(Boolean);
+
+const child = spawn(resolved.exe, [...extraArgs, path.join(__dirname, 'gui-smoke-main.js')], {
   cwd: path.join(__dirname, '..'),
   env: cleanEnv({
     SHUYUAN_SMOKE_OUT: OUT,

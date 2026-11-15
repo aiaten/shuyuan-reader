@@ -53,7 +53,14 @@ const env = cleanEnv();
 if (resolved.cacheRoot) env.SHUYUAN_ELECTRON_CACHE = resolved.cacheRoot;
 const extra = process.argv.slice(2);
 
-const child = spawn(resolved.exe, [root, ...extra], {
+// 额外的 Chromium 开关（空格分隔），例如受限环境 / CI 里需要 `--no-sandbox`：
+//   SHUYUAN_ELECTRON_ARGS=--no-sandbox pnpm start
+// 注意必须放在 app 路径之前，Chromium 才认这些开关。
+const envArgs = String(process.env.SHUYUAN_ELECTRON_ARGS || '')
+  .split(/\s+/)
+  .filter(Boolean);
+
+const child = spawn(resolved.exe, [...envArgs, root, ...extra], {
   cwd: root,
   env,
   stdio: 'inherit',

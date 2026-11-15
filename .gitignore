@@ -1,5 +1,6 @@
 node_modules/
 data/
+.electron-runtime/
 test/.cache/
 test/.tmp*/
 *.log
