@@ -113,10 +113,11 @@ def main():
                 committer_raw = line[10:]
         message = body.decode('utf8')
 
-        # 变更集 = 与该提交的**本地父提交**比较（远端没有本地父提交的对象）
+        # 变更集 = 本地父提交 -> 该提交（diff-tree 的参数顺序就是 A -> B，
+        # 写反了新增文件会被看成删除，API 创建 tree 时直接 422 BadObjectState）
         local_parent = git(repo, 'rev-parse', sha + '^')
         changed = git(repo, 'diff-tree', '-r', '--no-commit-id', '--name-status',
-                      '--no-renames', '--diff-filter=ACDMT', sha, local_parent)
+                      '--no-renames', '--diff-filter=ACDMT', local_parent, sha)
         entries = []
         for line in [l for l in changed.split('\n') if l.strip()]:
             status, path = line.split('\t', 1)
